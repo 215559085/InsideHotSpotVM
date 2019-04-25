@@ -202,7 +202,7 @@ void Compilation::build_hir() {
   _hir->verify();
 }
 ```
-build_hir()第一阶段解析字节码生成HIR；之后会检查HIR是否有效，如果无效会发生Compilation Bailout，即编译脱离，这个词在JIT编译器中经常出现，它值的是当编译器在编译过程中遇到一些很难处理的情况，或者一些极特殊情况时会停止编译，然后回退到解释器。当对HIR的检查通过后，C1对其进行条件表达式消除，基本块消除；接着使用全局值编号(GVN，Global Value Numbering)；后再[消除一些数组范围检查(Range Check Elimination)]((http://www.ssw.uni-linz.ac.at/Research/Papers/Wuerthinger07/Wuerthinger07.pdf))；最后做NULL检查消除。另外要注意的是，如果开启了分层编译(TieredCompilation)，那么条件表达式消除和基本块消除只会发生在Tier1，Tier2层。
+build_hir()第一阶段解析字节码生成HIR；之后会检查HIR是否有效，如果无效会发生Compilation Bailout，即编译脱离，这个词在JIT编译器中经常出现，它指的是当编译器在编译过程中遇到一些很难处理的情况，或者一些极特殊情况时会停止编译，然后回退到解释器。当对HIR的检查通过后，C1对其进行条件表达式消除，基本块消除；接着使用全局值编号(GVN，Global Value Numbering)；后再[消除一些数组范围检查(Range Check Elimination)]((http://www.ssw.uni-linz.ac.at/Research/Papers/Wuerthinger07/Wuerthinger07.pdf))；最后做NULL检查消除。另外要注意的是，如果开启了分层编译(TieredCompilation)，那么条件表达式消除和基本块消除只会发生在Tier1，Tier2层。
 
 ### 3.2 查看各阶段的HIR
 如果JVM是`fastdebug`版，加上`-XX:+PrintIR`参数可以输出每一个步骤的HIR：
