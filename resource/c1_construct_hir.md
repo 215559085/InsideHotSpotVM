@@ -101,4 +101,4 @@ void GraphBuilder::compare_op(ValueType* type, Bytecodes::Code code) {
   ipush(append(new CompareOp(code, x, y, state_before)));
 }
 ```
-完全按照JVM虚拟机规范上字节码的语义来。比如上面的logic_op即从操作数栈弹出两个值，然后做逻辑运算，具体逻辑运算类型用code表示。
+按照JVM虚拟机规范上字节码的语义来。比如上面的logic_op即从操作数栈弹出两个值，然后做逻辑运算，具体逻辑运算类型用code表示。除了这些常规的指令模拟外，还有些特殊指令可能会在模拟之外增加一些内容，
