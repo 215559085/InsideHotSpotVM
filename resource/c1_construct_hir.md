@@ -49,7 +49,7 @@ GraphBuilder首先使用BlockListBuilder遍历字节码构造所有基本块，�
 ## 4. 源码层次的字节码到HIR构造
 明白高观点下字节码是如何构造出HIR的，源码层次也变得很容易理解了。ValueStack表示用于模拟字节码执行的操作数栈和局部变量表：
 ```cpp
-// openjdk12\src\hotspot\share\c1\c1_ValueStack.hpp
+// hotspot\share\c1\c1_ValueStack.hpp
 class ValueStack: public CompilationResourceObj {
  public:
   enum Kind {
@@ -76,6 +76,7 @@ class ValueStack: public CompilationResourceObj {
 ```
 然后GraphBuilder的模拟过程如下：
 ```cpp
+// hotspot\share\c1\c1_GraphBuilder.cpp
 // 加载局部变量表的值到栈
 void GraphBuilder::load_local(ValueType* type, int index) {
   Value x = state()->local_at(index);
