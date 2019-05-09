@@ -60,13 +60,14 @@ jint Universe::initialize_heap() {
 ```
 
 ## 2. 创建Java堆
-在`Universe::initialize_heap()`JVM初始化宇宙模块时调用create_heap()创建堆，这个函数会进一步调用位于`memory/allocation`模块的AllocateHeap，`memory/allocation`包括了堆分配，堆释放，堆重分配API。虚拟机所有的内存分配都是调用这些API进行的。但是这些APIs实际还没有做分配动作，它们只是包装一下底层分配，比如分配失败做一些处理工作，真正的内存分配是位于`runtime/os`模块。
-上面的堆分配，堆释放，堆重分配API在OS模块中都有对应的低层次API：
+### 2.1 使用os::malloc()分配内存
+在`Universe::initialize_heap()`JVM初始化宇宙模块时调用create_heap()创建堆，这个函数会进一步调用位于`memory/allocation`模块的AllocateHeap，但是这些APIs实际还没有做分配动作，它们只是包装底层分配，处理一下分配失败，真正的内存分配是位于底层`runtime/os`模块：
 
 ![](mem_api.png)
 
-说到`runtime/os`是低层次内存分配，那它到底有多低呢？打开源码看看，其实没有太低。并没有像OS这个名字一样使用操作系统的VirtualAlloc，sbrk，而是使用C/C++语言运行时的`malloc()/free()`进行分配/释放的。
+说到`runtime/os`是底层内存分配，那它到底有多底层？打开源码看看，并没有像OS这个名字一样使用操作系统的VirtualAlloc，sbrk，而是使用C/C++语言运行时的`malloc()/free()`进行分配/释放的。
 
+### 2.2 堆在JVM中的表示
 内存是分配了，但是得有一个类来表示这片已分配、可GC的堆区。JVM有很多垃圾回收器，每个垃圾回收器处理的堆结构都是不一样的，比如G1GC处理的堆是由Region组成，CMS处理由老年代新生代组成的分代堆。这些不同的堆类型都继承自`gc/share/CollectedHeap`，抽象基类CollectedHeap表示所有堆都拥有的一些属性：
 
 ![](gc_heap_hierarchy.png)
@@ -76,7 +77,7 @@ jint Universe::initialize_heap() {
 class CollectedHeap : public CHeapObj<mtInternal> {
  private:
   GCHeapLog* _gc_heap_log;                  // GC日志
-  MemRegion _reserved;                      // ？？？
+  MemRegion _reserved;                      // 堆内存表示
  protected:
   bool _is_gc_active;                       // 是否正在GC。如果是stop-the-world就是true
 
@@ -92,7 +93,7 @@ class CollectedHeap : public CHeapObj<mtInternal> {
   ...
 };
 ```
-这样的堆是不能满足GC需求的。说好的新生代老年代呢，别急。上图继承模型中GenCollectedHeap正是分代堆的实现，它继承自CollectedHeap：
+上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的其实地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆：
 ```cpp
 //hotspot\share\gc\shared\genCollectedHeap.hpp
 class GenCollectedHeap : public CollectedHeap {
@@ -103,35 +104,56 @@ public:
   };
 
 protected:
-  Generation* _young_gen;
-  Generation* _old_gen;
-
-private:
-  GenerationSpec* _young_gen_spec;
-  GenerationSpec* _old_gen_spec;
-
-  // The singleton CardTable Remembered Set.
-  CardTableRS* _rem_set;
-
-  // The generational collector policy.
-  GenCollectorPolicy* _gen_policy;
-
-  SoftRefGenPolicy _soft_ref_gen_policy;
-
-  // The sizing of the heap is controlled by a sizing policy.
-  AdaptiveSizePolicy* _size_policy;
-
-  GCPolicyCounters* _gc_policy_counters;
-
-  // Indicates that the most recent previous incremental collection failed.
-  // The flag is cleared when an action is taken that might clear the
-  // condition that caused that incremental collection to fail.
-  bool _incremental_collection_failed;
-
-  // In support of ExplicitGCInvokesConcurrent functionality
-  unsigned int _full_collections_completed;
-
-  // functions
+  Generation* _young_gen;     // 新生代
+  Generation* _old_gen;       // 老年代
   ...
 };
+```
+看到GenCollectedHeap里面的`_young_gen`和`_old_gen`基本就稳了。它继承自CollectedHeap，其中CollectedHeap里面的_reserved表示整个堆，GenCollectedHeap的新生代和老年代进一步划分_reserved。这个划分工作发生在堆初始化中
+
+## 2. 初始化Java堆
+
+```cpp
+// hotspot\share\gc\shared\genCollectedHeap.cpp
+jint GenCollectedHeap::initialize() {
+  // While there are no constraints in the GC code that HeapWordSize
+  // be any particular value, there are multiple other areas in the
+  // system which believe this to be true (e.g. oop->object_size in some
+  // cases incorrectly returns the size in wordSize units rather than
+  // HeapWordSize).
+  guarantee(HeapWordSize == wordSize, "HeapWordSize must equal wordSize");
+
+  // Allocate space for the heap.
+
+  char* heap_address;
+  ReservedSpace heap_rs;
+
+  size_t heap_alignment = collector_policy()->heap_alignment();
+
+  heap_address = allocate(heap_alignment, &heap_rs);
+
+  if (!heap_rs.is_reserved()) {
+    vm_shutdown_during_initialization(
+      "Could not reserve enough space for object heap");
+    return JNI_ENOMEM;
+  }
+
+  initialize_reserved_region((HeapWord*)heap_rs.base(), (HeapWord*)(heap_rs.base() + heap_rs.size()));
+
+  _rem_set = create_rem_set(reserved_region());
+  _rem_set->initialize();
+  CardTableBarrierSet *bs = new CardTableBarrierSet(_rem_set);
+  bs->initialize();
+  BarrierSet::set_barrier_set(bs);
+
+  ReservedSpace young_rs = heap_rs.first_part(_young_gen_spec->max_size(), false, false);
+  _young_gen = _young_gen_spec->init(young_rs, rem_set());
+  heap_rs = heap_rs.last_part(_young_gen_spec->max_size());
+
+  ReservedSpace old_rs = heap_rs.first_part(_old_gen_spec->max_size(), false, false);
+  _old_gen = _old_gen_spec->init(old_rs, rem_set());
+  clear_incremental_collection_failed();
+
+  return JNI_OK;
+}
 ```
