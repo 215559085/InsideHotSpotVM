@@ -16,7 +16,7 @@
 
 ### 运行时
 + [[Inside HotSpot] Java的方法调用](resource/java_call.md)
-+ [[Inside HotSpot] 虚拟机中的Java堆](resource/gc_heap_overview.md) **WIP**
++ [[Inside HotSpot] Java分代堆模型](resource/gc_heap_overview.md) **WIP**
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/startup.md)

@@ -1,4 +1,4 @@
-# [Inside HotSpot] 虚拟机中的Java堆
+# [Inside HotSpot] Java分代堆模型
 
 ## 1. 宇宙初始化
 JVM在启动的时候会初始化各种结构，比如模板解释器，类加载器，当然也包括这篇文章的主题，Java堆。为了简单起见，本文所述Java堆均为分代堆(Generational Heap)，分代堆相信不用多说，新生代老年代堆模型都是融入每个Javer灵魂的东西。在讨论分代堆之前，我们先从头说起。
@@ -93,7 +93,7 @@ class CollectedHeap : public CHeapObj<mtInternal> {
   ...
 };
 ```
-上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的其实地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆：
+上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的起始地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆：
 ```cpp
 //hotspot\share\gc\shared\genCollectedHeap.hpp
 class GenCollectedHeap : public CollectedHeap {
@@ -109,47 +109,96 @@ protected:
   ...
 };
 ```
-看到GenCollectedHeap里面的`_young_gen`和`_old_gen`基本就稳了。它继承自CollectedHeap，其中CollectedHeap里面的_reserved表示整个堆，GenCollectedHeap的新生代和老年代进一步划分_reserved。这个划分工作发生在堆初始化中
+看到GenCollectedHeap里面的`_young_gen`和`_old_gen`基本就稳了。它继承自CollectedHeap，其中CollectedHeap里面的_reserved表示整个堆，GenCollectedHeap的新生代和老年代进一步划分_reserved。这个划分工作发生在堆初始化中。到这里还没完，我们知道JVM的新生代里面又可以分为Eden和Suvivor区，这些区域没有在GenCollectedHeap中体现，而是位于SerialHeap：
+```cpp
+// hotspot\share\gc\serial\serialHeap.hpp
+class SerialHeap : public GenCollectedHeap {
+private:
+  MemoryPool* _eden_pool;
+  MemoryPool* _survivor_pool;
+  MemoryPool* _old_pool;
 
-## 2. 初始化Java堆
+  virtual void initialize_serviceability();
 
+public:
+  static SerialHeap* heap();
+
+  SerialHeap(GenCollectorPolicy* policy);
+
+  virtual Name kind() const {
+    return CollectedHeap::Serial;
+  }
+
+  virtual const char* name() const {
+    return "Serial";
+  }
+
+  virtual GrowableArray<GCMemoryManager*> memory_managers();
+  virtual GrowableArray<MemoryPool*> memory_pools();
+
+  // override
+  virtual bool is_in_closed_subset(const void* p) const {
+    return is_in(p);
+  }
+
+  DefNewGeneration* young_gen() const {
+    assert(_young_gen->kind() == Generation::DefNew, "Wrong generation type");
+    return static_cast<DefNewGeneration*>(_young_gen);
+  }
+
+  TenuredGeneration* old_gen() const {
+    assert(_old_gen->kind() == Generation::MarkSweepCompact, "Wrong generation type");
+    return static_cast<TenuredGeneration*>(_old_gen);
+  }
+
+  // Apply "cur->do_oop" or "older->do_oop" to all the oops in objects
+  // allocated since the last call to save_marks in the young generation.
+  // The "cur" closure is applied to references in the younger generation
+  // at "level", and the "older" closure to older generations.
+  template <typename OopClosureType1, typename OopClosureType2>
+  void oop_since_save_marks_iterate(OopClosureType1* cur,
+                                    OopClosureType2* older);
+};
+```
+SerialHeap是继承链的底端了，它在分代堆(GenCollectedHeap)的基础上再划分新生代为Eden和Survivor
+
+![](gc_heap_diagram.png)
+
+这个SerialHeap最终将用于串行垃圾回收器(`-XX:+UseSerialGC`)
+
+## 3. 初始化Java堆
+在第一步中create_heap()创建了堆这个数据结构，但是里面的成员都是无效的，而第二步就是负责初始化这些成员。初始化分为initialize()和post_initialize()。
 ```cpp
 // hotspot\share\gc\shared\genCollectedHeap.cpp
 jint GenCollectedHeap::initialize() {
-  // While there are no constraints in the GC code that HeapWordSize
-  // be any particular value, there are multiple other areas in the
-  // system which believe this to be true (e.g. oop->object_size in some
-  // cases incorrectly returns the size in wordSize units rather than
-  // HeapWordSize).
-  guarantee(HeapWordSize == wordSize, "HeapWordSize must equal wordSize");
-
-  // Allocate space for the heap.
-
   char* heap_address;
   ReservedSpace heap_rs;
-
+  // 获取堆对齐
   size_t heap_alignment = collector_policy()->heap_alignment();
-
+  // 给堆分配空间
   heap_address = allocate(heap_alignment, &heap_rs);
-
+  // 如果分配失败则关闭虚拟机
   if (!heap_rs.is_reserved()) {
     vm_shutdown_during_initialization(
       "Could not reserve enough space for object heap");
     return JNI_ENOMEM;
   }
-
+  // 根据刚刚获得的堆空间来初始化
+  // CollectedHeap中的_reserved字段
   initialize_reserved_region((HeapWord*)heap_rs.base(), (HeapWord*)(heap_rs.base() + heap_rs.size()));
-
+  
+  // 创建并初始化remembered set
   _rem_set = create_rem_set(reserved_region());
   _rem_set->initialize();
   CardTableBarrierSet *bs = new CardTableBarrierSet(_rem_set);
   bs->initialize();
   BarrierSet::set_barrier_set(bs);
-
+  
+  // 根据刚刚获得的堆来初始化GenCollectedHeap的新生代
   ReservedSpace young_rs = heap_rs.first_part(_young_gen_spec->max_size(), false, false);
   _young_gen = _young_gen_spec->init(young_rs, rem_set());
   heap_rs = heap_rs.last_part(_young_gen_spec->max_size());
-
+ // 根据刚刚获得的堆来初始化GenCollectedHeap的老年代
   ReservedSpace old_rs = heap_rs.first_part(_old_gen_spec->max_size(), false, false);
   _old_gen = _old_gen_spec->init(old_rs, rem_set());
   clear_incremental_collection_failed();
@@ -157,3 +206,4 @@ jint GenCollectedHeap::initialize() {
   return JNI_OK;
 }
 ```
+initialize()初始化新生代老年代，完成基础的分代；然后post_initialize()将新生代细分为Eden和Survivor，然后再初始化标记清楚算法用到的一些数据结构。至此JVM的分代堆就可以为垃圾回收器所用了。
