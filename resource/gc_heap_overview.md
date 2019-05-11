@@ -1,9 +1,25 @@
 # [Inside HotSpot] Java分代堆模型
 
 ## 1. 宇宙初始化
-JVM在启动的时候会初始化各种结构，比如模板解释器，类加载器，当然也包括这篇文章的主题，Java堆。为了简单起见，本文所述Java堆均为分代堆(Generational Heap)，分代堆相信不用多说，新生代老年代堆模型都是融入每个Javer灵魂的东西。在讨论分代堆之前，我们先从头说起。
+JVM在启动的时候会初始化各种结构，比如模板解释器，类加载器，当然也包括这篇文章的主题，Java堆。在hotspot源码结构中`gc/shared`表示所有GC共同拥有的信息，`gc/g1`,`gc/cms`则是不同实现需要用到的特设信息。
+```bash
+λ tree
+├─gc
+│  ├─cms
+│  ├─epsilon
+│  ├─g1
+│  ├─parallel
+│  ├─serial
+│  ├─shared
+│  └─z
+```
+比如所有的Java堆都继承自CollectedHeap,这个结构就位于`gc/shared`，然后Serial GC需要的特设信息位于`gc/serial`，关于这点我们后面马上会提到。另外Java堆的类型很多，本文所述Java堆均为分代堆(Generational Heap)，它广泛用于Serial GC,CMS GC：
 
-Java堆初始化会经过一个调用链：
+![](gc_heap_diagram.png)
+
+关于什么是分代堆应该不用多说，新生代老年代堆模型都是融入每个Javer灵魂的东西。
+
+在讨论分代堆之前，我们先从头说起。Java堆初始化会经过一个调用链：
 ```js
 JNI_CreateJavaVM(prims/jni.cpp)
   ->JNI_CreateJavaVM_inner
@@ -12,7 +28,7 @@ JNI_CreateJavaVM(prims/jni.cpp)
         ->universe_init(memory/universe.cpp)
           ->Universe::initialize_heap()
 ```
-Universe模块（宇宙模块？）会负责高层次的Java堆的创建与初始化：
+Universe模块（宇宙模块？hh）会负责高层次的Java堆的创建与初始化：
 ```cpp
 jint Universe::initialize_heap() {
   // 创建Java堆
@@ -60,111 +76,11 @@ jint Universe::initialize_heap() {
 ```
 
 ## 2. 创建Java堆
-### 2.1 使用os::malloc()分配内存
-在`Universe::initialize_heap()`JVM初始化宇宙模块时调用create_heap()创建堆，这个函数会进一步调用位于`memory/allocation`模块的AllocateHeap，但是这些APIs实际还没有做分配动作，它们只是包装底层分配，处理一下分配失败，真正的内存分配是位于底层`runtime/os`模块：
+在JVM初始化宇宙模块时会调用create_heap()创建堆，这个函数会进一步调用位于`memory/allocation`模块的AllocateHeap，但是这些APIs实际还没有做分配动作，它们只是包装底层分配，处理一下分配失败，真正的内存分配是位于底层`runtime/os`模块：
 
 ![](mem_api.png)
 
 说到`runtime/os`是底层内存分配，那它到底有多底层？打开源码看看，并没有像OS这个名字一样使用操作系统的VirtualAlloc，sbrk，而是使用C/C++语言运行时的`malloc()/free()`进行分配/释放的。
-
-### 2.2 堆在JVM中的表示
-内存是分配了，但是得有一个类来表示这片已分配、可GC的堆区。JVM有很多垃圾回收器，每个垃圾回收器处理的堆结构都是不一样的，比如G1GC处理的堆是由Region组成，CMS处理由老年代新生代组成的分代堆。这些不同的堆类型都继承自`gc/share/CollectedHeap`，抽象基类CollectedHeap表示所有堆都拥有的一些属性：
-
-![](gc_heap_hierarchy.png)
-
-```cpp
-// hotspot\share\gc\shared\collectedHeap.hpp
-class CollectedHeap : public CHeapObj<mtInternal> {
- private:
-  GCHeapLog* _gc_heap_log;                  // GC日志
-  MemRegion _reserved;                      // 堆内存表示
- protected:
-  bool _is_gc_active;                       // 是否正在GC。如果是stop-the-world就是true
-
-  unsigned int _total_collections;          // Minor GC次数
-  unsigned int _total_full_collections;     // Full GC次数
-
-  GCCause::Cause _gc_cause;                 // 当前引发GC的原因
-  GCCause::Cause _gc_lastcause;             // 上次引发GC的原因
-  PerfStringVariable* _perf_gc_cause;       // perf上面两个
-  PerfStringVariable* _perf_gc_lastcause;
-
-  // functions
-  ...
-};
-```
-上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的起始地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆：
-```cpp
-//hotspot\share\gc\shared\genCollectedHeap.hpp
-class GenCollectedHeap : public CollectedHeap {
-public:
-  enum GenerationType {
-    YoungGen,
-    OldGen
-  };
-
-protected:
-  Generation* _young_gen;     // 新生代
-  Generation* _old_gen;       // 老年代
-  ...
-};
-```
-看到GenCollectedHeap里面的`_young_gen`和`_old_gen`基本就稳了。它继承自CollectedHeap，其中CollectedHeap里面的_reserved表示整个堆，GenCollectedHeap的新生代和老年代进一步划分_reserved。这个划分工作发生在堆初始化中。到这里还没完，我们知道JVM的新生代里面又可以分为Eden和Suvivor区，这些区域没有在GenCollectedHeap中体现，而是位于SerialHeap：
-```cpp
-// hotspot\share\gc\serial\serialHeap.hpp
-class SerialHeap : public GenCollectedHeap {
-private:
-  MemoryPool* _eden_pool;
-  MemoryPool* _survivor_pool;
-  MemoryPool* _old_pool;
-
-  virtual void initialize_serviceability();
-
-public:
-  static SerialHeap* heap();
-
-  SerialHeap(GenCollectorPolicy* policy);
-
-  virtual Name kind() const {
-    return CollectedHeap::Serial;
-  }
-
-  virtual const char* name() const {
-    return "Serial";
-  }
-
-  virtual GrowableArray<GCMemoryManager*> memory_managers();
-  virtual GrowableArray<MemoryPool*> memory_pools();
-
-  // override
-  virtual bool is_in_closed_subset(const void* p) const {
-    return is_in(p);
-  }
-
-  DefNewGeneration* young_gen() const {
-    assert(_young_gen->kind() == Generation::DefNew, "Wrong generation type");
-    return static_cast<DefNewGeneration*>(_young_gen);
-  }
-
-  TenuredGeneration* old_gen() const {
-    assert(_old_gen->kind() == Generation::MarkSweepCompact, "Wrong generation type");
-    return static_cast<TenuredGeneration*>(_old_gen);
-  }
-
-  // Apply "cur->do_oop" or "older->do_oop" to all the oops in objects
-  // allocated since the last call to save_marks in the young generation.
-  // The "cur" closure is applied to references in the younger generation
-  // at "level", and the "older" closure to older generations.
-  template <typename OopClosureType1, typename OopClosureType2>
-  void oop_since_save_marks_iterate(OopClosureType1* cur,
-                                    OopClosureType2* older);
-};
-```
-SerialHeap是继承链的底端了，它在分代堆(GenCollectedHeap)的基础上再划分新生代为Eden和Survivor
-
-![](gc_heap_diagram.png)
-
-这个SerialHeap最终将用于串行垃圾回收器(`-XX:+UseSerialGC`)
 
 ## 3. 初始化Java堆
 在第一步中create_heap()创建了堆这个数据结构，但是里面的成员都是无效的，而第二步就是负责初始化这些成员。初始化分为initialize()和post_initialize()。
@@ -207,3 +123,81 @@ jint GenCollectedHeap::initialize() {
 }
 ```
 initialize()初始化新生代老年代，完成基础的分代；然后post_initialize()将新生代细分为Eden和Survivor，然后再初始化标记清楚算法用到的一些数据结构。至此JVM的分代堆就可以为垃圾回收器所用了。
+
+
+## 4. 堆的详细结构
+前面我们提到JVM是如何建立一个堆的，这一节将详细分析这个堆长什么样子。JVM有很多垃圾回收器，每个垃圾回收器处理的堆结构都是不一样的，比如G1GC处理的堆是由Region组成，CMS处理由老年代新生代组成的分代堆。这些不同的堆类型都继承自`gc/share/CollectedHeap`，抽象基类CollectedHeap表示所有堆都拥有的一些属性：
+
+![](gc_heap_hierarchy.png)
+
+```cpp
+// hotspot\share\gc\shared\collectedHeap.hpp
+class CollectedHeap : public CHeapObj<mtInternal> {
+ private:
+  GCHeapLog* _gc_heap_log;                  // GC日志
+  MemRegion _reserved;                      // 堆内存表示
+ protected:
+  bool _is_gc_active;                       // 是否正在GC。如果是stop-the-world就是true
+
+  unsigned int _total_collections;          // Minor GC次数
+  unsigned int _total_full_collections;     // Full GC次数
+
+  GCCause::Cause _gc_cause;                 // 当前引发GC的原因
+  GCCause::Cause _gc_lastcause;             // 上次引发GC的原因
+  PerfStringVariable* _perf_gc_cause;       // perf上面两个
+  PerfStringVariable* _perf_gc_lastcause;
+
+  // functions
+  ...
+};
+```
+上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的起始地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆：
+```cpp
+//hotspot\share\gc\shared\genCollectedHeap.hpp
+class GenCollectedHeap : public CollectedHeap {
+public:
+  enum GenerationType {
+    YoungGen,
+    OldGen
+  };
+
+protected:
+  Generation* _young_gen;     // 新生代
+  Generation* _old_gen;       // 老年代
+  ...
+};
+```
+看到GenCollectedHeap里面的`_young_gen`和`_old_gen`基本就稳了。它继承自CollectedHeap，其中CollectedHeap里面的_reserved表示整个堆，GenCollectedHeap的新生代和老年代进一步划分_reserved。这个划分工作发生在堆初始化中。不同GC使用的新生代老年代也是不同的，所以不能一概而论，hotspot为此建立了如下分代模型：
+
+
+![](gc_heap_generation.png)
+
++ 分代基类：公有结构，保存上次GC耗时，该代的内存起始地址，GC性能计数
++ 默认新生代：一种包含Eden,From survivor, To survivor的分代
++ 并行新生代：
+
+
+每个代都自己的特色，不同GC根据不同需要可以"自由"组合，比如Serial GC就使用的是
+`DefNewGeneration` + `TenuredGeneration`的组合，CMS使用`ParNewGeneration` + `ConcurrentMarkSweepGeneration`的组合，
+
+
+
+到这里还没完，我们知道JVM的新生代里面又可以分为Eden和Suvivor区，这些区域没有在GenCollectedHeap中体现，而是位于SerialHeap：
+```cpp
+// hotspot\share\gc\serial\serialHeap.hpp
+class SerialHeap : public GenCollectedHeap {
+private:
+  MemoryPool* _eden_pool;
+  MemoryPool* _survivor_pool;
+  MemoryPool* _old_pool;
+
+  virtual void initialize_serviceability();
+
+public:
+  static SerialHeap* heap();
+
+};
+```
+SerialHeap是继承链的底端了，它在分代堆(GenCollectedHeap)的基础上再划分新生代为Eden和Survivor。这个SerialHeap最终将用于串行垃圾回收器(`-XX:+UseSerialGC`)。
+
+
