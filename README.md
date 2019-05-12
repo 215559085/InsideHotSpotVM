@@ -9,14 +9,14 @@
 + [[Inside HotSpot] 模板解释器](resource/template_interpreter.md)
 
 ### JIT编译器
-+ [[Inside HotSpot] C1编译器HIR的构造](resource/c1_construct_hir.md)
 + [[Inside HotSpot] C1编译器工作流程及中间表示](resource/c1_compile.md)
++ [[Inside HotSpot] C1编译器HIR的构造](resource/c1_construct_hir.md)
 + [[Inside HotSpot] C1编译器优化：条件表达式消除](resource/c1opt_conditional_elimination.md)
 + [[Inside HotSpot] C1编译器优化：全局值编号(GVN)](resource/c1opt_gvn.md)
 
 ### 运行时
 + [[Inside HotSpot] Java的方法调用](resource/java_call.md)
-+ [[Inside HotSpot] Java分代堆模型](resource/gc_heap_overview.md) **WIP**
++ [[Inside HotSpot] Java分代堆](resource/gc_heap_overview.md) **WIP**
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/startup.md)

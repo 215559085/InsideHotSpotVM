@@ -1,4 +1,4 @@
-# [Inside HotSpot] Java分代堆模型
+# [Inside HotSpot] Java分代堆
 
 ## 1. 宇宙初始化
 JVM在启动的时候会初始化各种结构，比如模板解释器，类加载器，当然也包括这篇文章的主题，Java堆。在hotspot源码结构中`gc/shared`表示所有GC共同拥有的信息，`gc/g1`,`gc/cms`则是不同实现需要用到的特设信息。
@@ -124,8 +124,8 @@ jint GenCollectedHeap::initialize() {
 ```
 initialize()初始化新生代老年代，完成基础的分代；然后post_initialize()将新生代细分为Eden和Survivor，然后再初始化标记清楚算法用到的一些数据结构。至此JVM的分代堆就可以为垃圾回收器所用了。
 
-
-## 4. 堆的详细结构
+## 4. JVM分代堆详细结构
+### 4.1 CollectedHeap
 前面我们提到JVM是如何建立一个堆的，这一节将详细分析这个堆长什么样子。JVM有很多垃圾回收器，每个垃圾回收器处理的堆结构都是不一样的，比如G1GC处理的堆是由Region组成，CMS处理由老年代新生代组成的分代堆。这些不同的堆类型都继承自`gc/share/CollectedHeap`，抽象基类CollectedHeap表示所有堆都拥有的一些属性：
 
 ![](gc_heap_hierarchy.png)
@@ -137,21 +137,19 @@ class CollectedHeap : public CHeapObj<mtInternal> {
   GCHeapLog* _gc_heap_log;                  // GC日志
   MemRegion _reserved;                      // 堆内存表示
  protected:
-  bool _is_gc_active;                       // 是否正在GC。如果是stop-the-world就是true
+  bool _is_gc_active;                       // 是否正在GC
 
   unsigned int _total_collections;          // Minor GC次数
   unsigned int _total_full_collections;     // Full GC次数
 
   GCCause::Cause _gc_cause;                 // 当前引发GC的原因
   GCCause::Cause _gc_lastcause;             // 上次引发GC的原因
-  PerfStringVariable* _perf_gc_cause;       // perf上面两个
-  PerfStringVariable* _perf_gc_lastcause;
-
-  // functions
   ...
 };
 ```
-上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的起始地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆：
+上面的**_reserved**就表示Java堆这片连续的地址，它包含堆的起始地址和大小，即`[start,start+size]`。然而这样的堆是不能满足GC需求的，Full GC处理老年代，Minor GC处理新生代，可是这两个“代”都没有在CollectedHeap中体现。翻翻上图继承模型，GenCollectedHeap才是分代堆。
+
+### 4.2 GenCollectedHeap
 ```cpp
 //hotspot\share\gc\shared\genCollectedHeap.hpp
 class GenCollectedHeap : public CollectedHeap {
@@ -174,30 +172,38 @@ protected:
 
 + 分代基类：公有结构，保存上次GC耗时，该代的内存起始地址，GC性能计数
 + 默认新生代：一种包含Eden,From survivor, To survivor的分代
-+ 并行新生代：
++ 并行新生代：可并行GC的默认新生代
++ 卡表代：包含卡表(CardTable)的分代
++ 久任代：可Mark-Compact的卡表代
++ 并行标记清楚代：可并行Mark-Sweep的卡表代
 
+每个代都自己的特色，不同GC根据不同需要可以"自由"组合，比如Serial GC就使用的是`DefNewGeneration` + `TenuredGeneration`的组合，CMS使用`ParNewGeneration` + `ConcurrentMarkSweepGeneration`的组合。
 
-每个代都自己的特色，不同GC根据不同需要可以"自由"组合，比如Serial GC就使用的是
-`DefNewGeneration` + `TenuredGeneration`的组合，CMS使用`ParNewGeneration` + `ConcurrentMarkSweepGeneration`的组合，
-
-
-
-到这里还没完，我们知道JVM的新生代里面又可以分为Eden和Suvivor区，这些区域没有在GenCollectedHeap中体现，而是位于SerialHeap：
+### 4.3 SerialHeap
+最后一步，Serial GC专用的堆继承自GenCollectedHeap并在其上稍作封装。这个SerialHeap最终将用于串行垃圾回收器(`-XX:+UseSerialGC`)。
 ```cpp
 // hotspot\share\gc\serial\serialHeap.hpp
 class SerialHeap : public GenCollectedHeap {
-private:
-  MemoryPool* _eden_pool;
-  MemoryPool* _survivor_pool;
-  MemoryPool* _old_pool;
-
-  virtual void initialize_serviceability();
-
-public:
   static SerialHeap* heap();
-
+  virtual Name kind() const {
+    return CollectedHeap::Serial;
+  }
+  virtual const char* name() const {
+    return "Serial";
+  }
+  ...
 };
 ```
-SerialHeap是继承链的底端了，它在分代堆(GenCollectedHeap)的基础上再划分新生代为Eden和Survivor。这个SerialHeap最终将用于串行垃圾回收器(`-XX:+UseSerialGC`)。
 
+## 5. 分代堆中的代
+关于GenCollectedHeap的各种代还有很多内容，我们关注`DefNewGeneration` + `TenuredGeneration`的组合，它被用于SerialGC。
 
+久任代继承自卡表代，所谓卡表代是指用卡(Card)划分整个老年代。我们知道，标记清除需要遍历整个老年代来找出指向新生代的指针，至于为什么要做这个遍历看几副图即可明白。假设有堆中已经存在这样的引用关系：
+
+![](gc_phase_1.png)
+
+现在加入分配了新的对象：
+
+![](gc_phase_2.png)
+
+其中老年代的对象存在指向新生代的指针，但是GC Root并没有，如果这时候只从GC Root出发标记对象，就会错过红线指向的对象，继而导致被误做垃圾而清除。但是问题是老年代一般都很大，这样的遍历是比较慢的。卡表就是为了解决这个问题引入的，它将老年代划分为512KB的卡，这些卡组成卡表(Card table)。如果卡表为false则表示该512KB的区域不存在指向新生代的引用，那么就可以直接跳过该区域，减少了遍历时间。
