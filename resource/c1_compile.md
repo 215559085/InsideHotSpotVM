@@ -5,7 +5,27 @@ C1编译器(aka Client Compiler)的代码位于`hotspot\share\c1`。C1编译线�
 
 ![](c1_compiling.png)
 
-CompilerBroker到C1编译器进行JIT编译的调用栈如下：
+有一个取巧的办法可以得到详细的工作流程：C1编译器会对每个阶段做性能计时，这个计时取名就是阶段名字，所以我们可以通过计时看看详细步骤：
+```cpp
+//hotspot\share\c1\c1_Compilation.cpp
+typedef enum {
+  _t_compile,                     // C1编译
+    _t_setup,                     //   1)设置C1编译环境
+    _t_buildIR,                   //   2)构造HIR
+      _t_hir_parse,               //     从字节码生成HIR
+      _t_gvn,                     //     GVN优化
+      _t_optimize_blocks,         //     基本块优化
+      _t_optimize_null_checks,    //     null检查优化消除
+      _t_rangeCheckElimination,   //     数组范围检查消除
+    _t_emit_lir,                  //   3)构造LIR
+      _t_linearScan,              //     线性扫描寄存器分配
+      _t_lirGeneration,           //     生成LIR
+    _t_codeemit,                  //   机器代码生成
+    _t_codeinstall,               //   替换解释执行的代码为机器代码(nmethod)
+  max_phase_timers
+} TimerName;
+```
+这里我们主要关心第二三阶段。它们位于`c1/compilation`模块。从CompilerBroker到该阶段的调用栈如下：
 ```bash
 CompileBroker::invoke_compiler_on_method()
     -> Compiler::compile_method()
@@ -16,31 +36,18 @@ CompileBroker::invoke_compiler_on_method()
 在compile_java_method()方法中完成了C1编译最主要的流程：
 ```cpp
 int Compilation::compile_java_method() {
-  if (BailoutOnExceptionHandlers) {
-    if (method()->has_exception_handlers()) {
-      bailout("linear scan can't handle exception handlers");
-    }
-  }
-
-  if (is_profiling() && !method()->ensure_method_data()) {
-    BAILOUT_("mdo allocation failed", no_frame_size);
-  }
+  ..
   // 构造HIR
   {
     PhaseTraceTime timeit(_t_buildIR);
     build_hir();
   }
-  if (BailoutAfterHIR) {
-    BAILOUT_("Bailing out because of -XX:+BailoutAfterHIR", no_frame_size);
-  }
   // 构造LIR
   {
     PhaseTraceTime timeit(_t_emit_lir);
-
     _frame_map = new FrameMap(method(), hir()->number_of_locks(), MAX2(4, hir()->max_stack()));
     emit_lir();
   }
-  CHECK_BAILOUT_(no_frame_size);
   // 生成机器代码
   {
     PhaseTraceTime timeit(_t_codeemit);
@@ -48,6 +55,7 @@ int Compilation::compile_java_method() {
   }
 }
 ```
+二三阶段将Java字节码转换为各种形式的**中间表示(HIR,LIR)**，然后在其上做代码优化和机器代码生成，这个机器代码就是C1 JIT产出的东西。可以看出，沟通Java字节码和JIT产出的机器代码之前的桥梁就是中间表示，C1的大部分工作也是针对中间表示做各种变换，要明白C1的工作得先说说什么是中间表示。
 
 ## 2. 中间表示简介
 C1编译器(Client Compiler)将字节码转化为**SSA-based HIR**(Single Static Assignment based High-Level Intermediate Representation)。HIR即高级中间表示，我们用Java写代码，编译得到字节码。但即便是字节码对于编译器优化来说也不太理想，编译器会使用一种更适合优化的形式来表征字节码。这个**更适合优化的形式**就是HIR，HIR又有很多，有些是图的形式，有些是线性的形式，
