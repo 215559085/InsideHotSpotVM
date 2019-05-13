@@ -12,13 +12,14 @@ class Foo{
 为了深入理解JVM Serial GC工作过程，还得"精心"安排一下Java堆划分：
 ```js
 -Xmx100m -Xms100m -Xmn40m -Xlog:gc* -XX:+UseSerialGC
+---------------------------------------------------------------------------
 Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
-  def new generation   total 36864K, used 3277K [0x00000000f9c00000, 0x00000000fc400000, 0x00000000fc400000)
-   eden space 32768K,  10% used [0x00000000f9c00000, 0x00000000f9f33508, 0x00000000fbc00000)
-   from space 4096K,   0% used [0x00000000fbc00000, 0x00000000fbc00000, 0x00000000fc000000)
-   to   space 4096K,   0% used [0x00000000fc000000, 0x00000000fc000000, 0x00000000fc400000)
-  tenured generation   total 61440K, used 40960K [0x00000000fc400000, 0x0000000100000000, 0x0000000100000000)
-    the space 61440K,  66% used [0x00000000fc400000, 0x00000000fec00010, 0x00000000fec00200, 0x0000000100000000)
+  def new generation   total 36864K, used 3277K
+   eden space 32768K,  10% used
+   from space 4096K,   0% used
+   to   space 4096K,   0% used 
+  tenured generation   total 61440K, used 40960K 
+    the space 61440K,  66% used 
   Metaspace       used 572K, capacity 4500K, committed 4864K, reserved 1056768K
    class space    used 48K, capacity 388K, committed 512K, reserved 1048576K
 ```
@@ -50,12 +51,12 @@ public class GCBaby {
  GC(0) Pause Young (Allocation Failure) 42M->0M(96M) 3.711ms
  GC(0) User=0.00s Sys=0.00s Real=0.00s
 
-  def new generation   total 36864K, used 1638K [0x00000000f9c00000, 0x00000000fc400000, 0x00000000fc400000)
-   eden space 32768K,   5% used [0x00000000f9c00000, 0x00000000f9d99b98, 0x00000000fbc00000)
-   from space 4096K,   0% used [0x00000000fc000000, 0x00000000fc000000, 0x00000000fc400000)
-   to   space 4096K,   0% used [0x00000000fbc00000, 0x00000000fbc00000, 0x00000000fc000000)
-  tenured generation   total 61440K, used 41755K [0x00000000fc400000, 0x0000000100000000, 0x0000000100000000)
-    the space 61440K,  67% used [0x00000000fc400000, 0x00000000fecc6e40, 0x00000000fecc7000, 0x0000000100000000)
+  def new generation   total 36864K, used 1638K 
+   eden space 32768K,   5% used 
+   from space 4096K,   0% used 
+   to   space 4096K,   0% used 
+  tenured generation   total 61440K, used 41755K
+    the space 61440K,  67% used 
   Metaspace       used 608K, capacity 4500K, committed 4864K, reserved 1056768K
    class space    used 51K, capacity 388K, committed 512K, reserved 1048576K
 ```
