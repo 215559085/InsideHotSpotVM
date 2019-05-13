@@ -16,7 +16,10 @@
 
 ### 运行时
 + [[Inside HotSpot] Java的方法调用](resource/java_call.md)
+
+## GC
 + [[Inside HotSpot] Java分代堆](resource/gc_heap_overview.md) **WIP**
++ [[Inside HotSpot] Serial GC](resource/gc_sergialgc.md) **WIP**
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/startup.md)
