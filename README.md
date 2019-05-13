@@ -20,4 +20,5 @@
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/startup.md)
++ [[Inside HotSpot] JVM新日志接口-xlog](resource/jvm_xlog.md)
 
