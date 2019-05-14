@@ -12,7 +12,7 @@ class Foo{
 为了深入理解JVM Serial GC工作过程，还得"精心"安排一下Java堆划分：
 ```js
 -Xmx100m -Xms100m -Xmn40m -Xlog:gc* -XX:+UseSerialGC
----------------------------------------------------------------------------
+-----------------------------------------------------
 Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
   def new generation   total 36864K, used 3277K
    eden space 32768K,  10% used
@@ -23,7 +23,8 @@ Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
   Metaspace       used 572K, capacity 4500K, committed 4864K, reserved 1056768K
    class space    used 48K, capacity 388K, committed 512K, reserved 1048576K
 ```
-将设置新生代为40m，老年代为60m，然后使用Serial GC。然后Foo对象占用40M空间，为了触发Full GC，可以new两个Foo：
+上面的参数将设置新生代为40m，老年代为60m，然后使用Serial GC并输出gc信息，另外`-Xlog:gc`表示输出最基本的GC信息，`-Xlog:gc*`表示输出详细GC信息，`-Xlog:gc*=trace`表示输出最详细信息，包括卡表建立，引用地址等，不过这不适用于production级虚拟机。
+再看看Foo对象，它占用40M空间，为了触发Full GC，可以new两个Foo：
 ```java
 public class GCBaby {
     public static void main(String[] args) {
@@ -60,5 +61,5 @@ public class GCBaby {
   Metaspace       used 608K, capacity 4500K, committed 4864K, reserved 1056768K
    class space    used 51K, capacity 388K, committed 512K, reserved 1048576K
 ```
-这时候老年代使用了40M，说明Full GC清除了一个Foo，还剩下一个Foo()。上面的日志则是GC的详细过程。这篇文章将分析这些过程。
+这时候老年代使用了40M，说明Full GC清除了一个Foo，还剩下一个Foo()。上面的日志则是GC的详细过程，这篇文章将围绕上述过程展开。
 

@@ -19,9 +19,10 @@
 
 ## GC
 + [[Inside HotSpot] Java分代堆](resource/gc_heap_overview.md) **WIP**
-+ [[Inside HotSpot] Serial GC](resource/gc_sergialgc.md) **WIP**
++ [[Inside HotSpot] Serial GC](resource/gc_serialgc.md) **WIP**
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/startup.md)
 + [[Inside HotSpot] JVM新日志接口-xlog](resource/jvm_xlog.md)
++ [[Inside HotSpot] JVMTI](resource/jvmti.md)
 
