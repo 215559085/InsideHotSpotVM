@@ -315,96 +315,45 @@ inline void MarkSweep::follow_array(objArrayOop array) {
   }
 }
 ```
-GC Root有很多，有的是我们耳熟能详的，有的则是略微少见，它们都包含可进行标记的引用，会视情况进行STW标记或者并发标记：
+既然走到这里了不如看看JVM是如何标记对象的：
+```cpp
+inline void MarkSweep::mark_object(oop obj) {
+  // 获取对象的mark word
+  markOop mark = obj->mark_raw();
+  // 设置gc标记
+  obj->set_mark_raw(markOopDesc::prototype()->set_marked());
+  // 垃圾回收器视情况保留对象的gc标志
+  if (mark->must_be_preserved(obj)) {
+    preserve_mark(obj, mark);
+  }
+}
+```
+对象的mark work有32bits或者64bits，取决于CPU架构和UseCompressedOops：
+```js
+// hotspot\share\oops\markOop.hpp
+32 位mark lword：
+          hash:25 ------------>| age:4    biased_lock:1 lock:2 (normal object)
+          JavaThread*:23 epoch:2 age:4    biased_lock:1 lock:2 (biased object)
+          size:32 ------------------------------------------>| (CMS free block)
+          PromotedObject*:29 ---------->| promo_bits:3 ----->| (CMS promoted object)
+
+最后的lock2位有不同含义：
+          [ptr             | 00]  locked             ptr指向栈上真正的对象头
+          [header      | 0 | 01]  unlocked           普通对象头
+          [ptr             | 10]  monitor            碰撞锁
+          [ptr             | 11]  marked             GC标记
+```
+原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示碰撞锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留GC标志。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见，它们都包含可进行标记的引用，会视情况进行单线程标记或者并发标记：
+
 + 所有已加载的类(`ClassLoaderDataGraph::roots_cld_do`)
-+ 所有Java线程当前栈帧的应用(`Threads::possibly_parallel_oops_do`)
++ 所有Java线程当前栈帧的引用和虚拟机内部线程(`Threads::possibly_parallel_oops_do`)
 + JVM内部使用的引用(`Universe::oopds_do`和`SystemDictionary::oops_do`)
 + JNI handles(`JNIHandles::oops_do`)
 + 所有synchronized锁住的对象引用(`ObjectSynchronizer::oops_do`)
 + java.lang.management对象(`Management::oops_do`)
 + JVMTI导出(`JvmtiExport::oops_do`)
-+ AOT加载器的堆(`AOTLoader::oops_do`)
++ AOT代码的堆(`AOTLoader::oops_do`)
 + code cache(`CodeCache::blobs_do`)
 + String常量池(`StringTable::oops_do`)
 
-```cpp
-void GenCollectedHeap::process_roots(StrongRootsScope* scope,
-                                     ScanningOption so,
-                                     OopClosure* strong_roots,
-                                     CLDClosure* strong_cld_closure,
-                                     CLDClosure* weak_cld_closure,
-                                     CodeBlobToOopClosure* code_roots) {
-  // General roots.
-  assert(Threads::thread_claim_parity() != 0, "must have called prologue code");
-  assert(code_roots != NULL, "code root closure should always be set");
-  // _n_termination for _process_strong_tasks should be set up stream
-  // in a method not running in a GC worker.  Otherwise the GC worker
-  // could be trying to change the termination condition while the task
-  // is executing in another GC worker.
-
-  if (_process_strong_tasks->try_claim_task(GCH_PS_ClassLoaderDataGraph_oops_do)) {
-    ClassLoaderDataGraph::roots_cld_do(strong_cld_closure, weak_cld_closure);
-  }
-
-  // Only process code roots from thread stacks if we aren't visiting the entire CodeCache anyway
-  CodeBlobToOopClosure* roots_from_code_p = (so & SO_AllCodeCache) ? NULL : code_roots;
-
-  bool is_par = scope->n_threads() > 1;
-  Threads::possibly_parallel_oops_do(is_par, strong_roots, roots_from_code_p);
-
-  if (_process_strong_tasks->try_claim_task(GCH_PS_Universe_oops_do)) {
-    Universe::oops_do(strong_roots);
-  }
-  // Global (strong) JNI handles
-  if (_process_strong_tasks->try_claim_task(GCH_PS_JNIHandles_oops_do)) {
-    JNIHandles::oops_do(strong_roots);
-  }
-
-  if (_process_strong_tasks->try_claim_task(GCH_PS_ObjectSynchronizer_oops_do)) {
-    ObjectSynchronizer::oops_do(strong_roots);
-  }
-  if (_process_strong_tasks->try_claim_task(GCH_PS_Management_oops_do)) {
-    Management::oops_do(strong_roots);
-  }
-  if (_process_strong_tasks->try_claim_task(GCH_PS_jvmti_oops_do)) {
-    JvmtiExport::oops_do(strong_roots);
-  }
-  if (UseAOT && _process_strong_tasks->try_claim_task(GCH_PS_aot_oops_do)) {
-    AOTLoader::oops_do(strong_roots);
-  }
-
-  if (_process_strong_tasks->try_claim_task(GCH_PS_SystemDictionary_oops_do)) {
-    SystemDictionary::oops_do(strong_roots);
-  }
-
-  if (_process_strong_tasks->try_claim_task(GCH_PS_CodeCache_oops_do)) {
-    if (so & SO_ScavengeCodeCache) {
-      assert(code_roots != NULL, "must supply closure for code cache");
-
-      // We only visit parts of the CodeCache when scavenging.
-      CodeCache::scavenge_root_nmethods_do(code_roots);
-    }
-    if (so & SO_AllCodeCache) {
-      assert(code_roots != NULL, "must supply closure for code cache");
-
-      // CMSCollector uses this to do intermediate-strength collections.
-      // We scan the entire code cache, since CodeCache::do_unloading is not called.
-      CodeCache::blobs_do(code_roots);
-    }
-    // Verify that the code cache contents are not subject to
-    // movement by a scavenging collection.
-    DEBUG_ONLY(CodeBlobToOopClosure assert_code_is_non_scavengable(&assert_is_non_scavengable_closure, !CodeBlobToOopClosure::FixRelocations));
-    DEBUG_ONLY(CodeCache::asserted_non_scavengable_nmethods_do(&assert_code_is_non_scavengable));
-  }
-}
-
-void GenCollectedHeap::process_string_table_roots(StrongRootsScope* scope,
-                                                  OopClosure* root_closure,
-                                                  OopStorage::ParState<false, false>* par_state_string) {
-  if (scope->n_threads() > 1) {
-    StringTable::possibly_parallel_oops_do(par_state_string, root_closure);
-  } else {
-    StringTable::oops_do(root_closure);
-  }
-}
-```
+最后JVM使用CAS(Atomic::cmpxchg)自旋锁等待标记任务，如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
