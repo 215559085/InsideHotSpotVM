@@ -1,6 +1,10 @@
 # Inside-HotSpot
 
 关于HotSpot(OpenJDK12)的内幕，对某个部分感兴趣的朋友可以创建Issue说明。Github Just-In-Time更新，[博客](https://www.cnblogs.com/kelthuzadx/)滞后更新。(注:WIP表示未完成的文章)
+有几点要注意下~：
+
+1. 文章中JVM,jvm,hotspot,HotSpot等都表示的OpenJDK12的HotSpot虚拟机实现
+2. 代码的部分干扰比如断言已清除
 
 ### 构建与调试
 + [Visual Studio2017编译调试openjdk12](resource/building.md)

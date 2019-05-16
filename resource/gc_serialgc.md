@@ -182,90 +182,17 @@ void GenMarkSweep::invoke_at_safepoint(ReferenceProcessor* rp, bool clear_all_so
   gch->trace_heap_after_gc(_gc_tracer);
 }
 ```
-## 标记存活对象
-mark_phase_1:
-```cpp
-void GenMarkSweep::mark_sweep_phase1(bool clear_all_softrefs) {
-  // Recursively traverse all live objects and mark them
-  GCTraceTime(Info, gc, phases) tm("Phase 1: Mark live objects", _gc_timer);
-
-  GenCollectedHeap* gch = GenCollectedHeap::heap();
-
-  // Because follow_root_closure is created statically, cannot
-  // use OopsInGenClosure constructor which takes a generation,
-  // as the Universe has not been created when the static constructors
-  // are run.
-  follow_root_closure.set_orig_generation(gch->old_gen());
-
-  // Need new claim bits before marking starts.
-  ClassLoaderDataGraph::clear_claimed_marks();
-
-  {
-    StrongRootsScope srs(1);
-
-    gch->full_process_roots(&srs,
-                            false, // not the adjust phase
-                            GenCollectedHeap::SO_None,
-                            ClassUnloading, // only strong roots if ClassUnloading
-                                            // is enabled
-                            &follow_root_closure,
-                            &follow_cld_closure);
-  }
-
-  // Process reference objects found during marking
-  {
-    GCTraceTime(Debug, gc, phases) tm_m("Reference Processing", gc_timer());
-
-    ref_processor()->setup_policy(clear_all_softrefs);
-    ReferenceProcessorPhaseTimes pt(_gc_timer, ref_processor()->max_num_queues());
-    const ReferenceProcessorStats& stats =
-      ref_processor()->process_discovered_references(
-        &is_alive, &keep_alive, &follow_stack_closure, NULL, &pt);
-    pt.print_all_references();
-    gc_tracer()->report_gc_reference_stats(stats);
-  }
-
-  // This is the point where the entire marking should have completed.
-  assert(_marking_stack.is_empty(), "Marking should have completed");
-
-  {
-    GCTraceTime(Debug, gc, phases) tm_m("Weak Processing", gc_timer());
-    WeakProcessor::weak_oops_do(&is_alive, &do_nothing_cl);
-  }
-
-  {
-    GCTraceTime(Debug, gc, phases) tm_m("Class Unloading", gc_timer());
-
-    // Unload classes and purge the SystemDictionary.
-    bool purged_class = SystemDictionary::do_unloading(gc_timer());
-
-    // Unload nmethods.
-    CodeCache::do_unloading(&is_alive, purged_class);
-
-    // Prune dead klasses from subklass/sibling/implementor lists.
-    Klass::clean_weak_klass_links(purged_class);
-  }
-
-  {
-    GCTraceTime(Debug, gc, phases) t("Scrub String Table", gc_timer());
-    // Delete entries for dead interned strings.
-    StringTable::unlink(&is_alive);
-  }
-
-  {
-    GCTraceTime(Debug, gc, phases) t("Scrub Symbol Table", gc_timer());
-    // Clean up unreferenced symbols in symbol table.
-    SymbolTable::unlink();
-  }
-
-  gc_tracer()->report_object_count_after_gc(&is_alive);
-}
+## 1. 阶段1：标记存活对象
+Serial GC的Full GC第一阶段对应GC日志的
+```js
+ GC(1) Phase 1: Mark live objects
 ```
+它会遍历GC Root标记可达对象，处理`java.lang.ref.*`特殊引用类型，清除字符串常量池无效字符串等等，这一阶段占用了标记清除大部分的时间。下面是阶段一最重要的小步骤。
 
-## 遍历GC Root
+### 1.1 遍历GC Root(process_roots())
 JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法。GC模块有很多闭包(closure)，它们代表的是一段代码、一种行为。root_closure就是一个`MarkSweep::FollowRootClosure`闭包。这个闭包很强大，给它一个对象，就能标记这个对象，迭代标记对象的成员，以及对象所在的栈的所有对象及其成员：
 ```cpp
-// hotspot\share\gc\serial\markSweep.inline.hpp
+// hotspot\share\gc\serial\markSweep.cpp
 void MarkSweep::FollowRootClosure::do_oop(oop* p)       { follow_root(p); }
 
 template <class T> inline void MarkSweep::follow_root(T* p) {
@@ -356,4 +283,39 @@ inline void MarkSweep::mark_object(oop obj) {
 + code cache(`CodeCache::blobs_do`)
 + String常量池(`StringTable::oops_do`)
 
-最后JVM使用CAS(Atomic::cmpxchg)自旋锁等待标记任务，如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
+最后JVM使用CAS(Atomic::cmpxchg)自旋锁等待标记任务。如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
+
+### 1.2 处理java.lang.ref.*特殊引用类型(ReferenceProcessor)
+当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对特殊引用类型做一些处理。所谓特殊引用类型即：
+
++ 弱引用：
++ 软引用：
++ 虚引用：
++ final引用:重写了finalize()方法的引用。
+
+如果待回收队列里面存在final引用，就使用`DefNewGeneration::FastKeepAliveClosure`闭包将对象再次标记为存活，然后放入fianlize队列等待Java层面的FinalizeThread调用该对象的finalize()方法，当调用完成后下次GC该对象就会被老老实实回收：
+```cpp
+size_t ReferenceProcessor::process_final_keep_alive_work(DiscoveredList& refs_list,
+                                                         OopClosure*     keep_alive,
+                                                         VoidClosure*    complete_gc) {
+  DiscoveredListIterator iter(refs_list, keep_alive, NULL);
+  while (iter.has_next()) {
+    // 让引用关联的对象复活
+    iter.load_ptrs(DEBUG_ONLY(false /* allow_null_referent */));
+    iter.make_referent_alive();
+    java_lang_ref_Reference::set_next_raw(iter.obj(), iter.obj());
+    // 加入finalize队列等待FinalizeThread调用该对象的finalize方法
+    iter.enqueue();
+    iter.next();
+  }
+  iter.complete_enqueue();
+  complete_gc->do_void();
+  refs_list.clear();
+  return iter.removed();
+}
+```
+所以说重写了finalize()的方法不得不到析构的语义，还会耽误GC回收对象。
+
+
+
+## 1. 阶段2：计算对象新地址
