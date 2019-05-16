@@ -63,3 +63,348 @@ public class GCBaby {
 ```
 这时候老年代使用了40M，说明Full GC清除了一个Foo，还剩下一个Foo()。上面的日志则是GC的详细过程，这篇文章将围绕上述过程展开。
 
+## 2. 久任代的Full GC
+```cpp
+// hotspot\share\gc\serial\genMarkSweep.cpp
+void TenuredGeneration::collect(bool   full,
+                                bool   clear_all_soft_refs,
+                                size_t size,
+                                bool   is_tlab) {
+  GenCollectedHeap* gch = GenCollectedHeap::heap();
+
+  // Temporarily expand the span of our ref processor, so
+  // refs discovery is over the entire heap, not just this generation
+  ReferenceProcessorSpanMutator
+    x(ref_processor(), gch->reserved_region());
+
+  STWGCTimer* gc_timer = GenMarkSweep::gc_timer();
+  gc_timer->register_gc_start();
+
+  SerialOldTracer* gc_tracer = GenMarkSweep::gc_tracer();
+  gc_tracer->report_gc_start(gch->gc_cause(), gc_timer->gc_start());
+
+  gch->pre_full_gc_dump(gc_timer);
+
+  GenMarkSweep::invoke_at_safepoint(ref_processor(), clear_all_soft_refs);
+
+  gch->post_full_gc_dump(gc_timer);
+
+  gc_timer->register_gc_end();
+
+  gc_tracer->report_gc_end(gc_timer->gc_end(), gc_timer->time_partitions());
+}
+```
+
+```cpp
+// hotspot\share\gc\serial\genMarkSweep.cpp
+void GenMarkSweep::invoke_at_safepoint(ReferenceProcessor* rp, bool clear_all_softrefs) {
+  GenCollectedHeap* gch = GenCollectedHeap::heap();
+
+  // hook up weak ref data so it can be used during Mark-Sweep
+  assert(ref_processor() == NULL, "no stomping");
+  assert(rp != NULL, "should be non-NULL");
+  set_ref_processor(rp);
+  rp->setup_policy(clear_all_softrefs);
+
+  gch->trace_heap_before_gc(_gc_tracer);
+
+  // When collecting the permanent generation Method*s may be moving,
+  // so we either have to flush all bcp data or convert it into bci.
+  CodeCache::gc_prologue();
+
+  // Increment the invocation count
+  _total_invocations++;
+
+  // Capture used regions for each generation that will be
+  // subject to collection, so that card table adjustments can
+  // be made intelligently (see clear / invalidate further below).
+  gch->save_used_regions();
+
+  allocate_stacks();
+
+  mark_sweep_phase1(clear_all_softrefs);
+
+  mark_sweep_phase2();
+
+  // Don't add any more derived pointers during phase3
+#if COMPILER2_OR_JVMCI
+  assert(DerivedPointerTable::is_active(), "Sanity");
+  DerivedPointerTable::set_active(false);
+#endif
+
+  mark_sweep_phase3();
+
+  mark_sweep_phase4();
+
+  restore_marks();
+
+  // Set saved marks for allocation profiler (and other things? -- dld)
+  // (Should this be in general part?)
+  gch->save_marks();
+
+  deallocate_stacks();
+
+  // If compaction completely evacuated the young generation then we
+  // can clear the card table.  Otherwise, we must invalidate
+  // it (consider all cards dirty).  In the future, we might consider doing
+  // compaction within generations only, and doing card-table sliding.
+  CardTableRS* rs = gch->rem_set();
+  Generation* old_gen = gch->old_gen();
+
+  // Clear/invalidate below make use of the "prev_used_regions" saved earlier.
+  if (gch->young_gen()->used() == 0) {
+    // We've evacuated the young generation.
+    rs->clear_into_younger(old_gen);
+  } else {
+    // Invalidate the cards corresponding to the currently used
+    // region and clear those corresponding to the evacuated region.
+    rs->invalidate_or_clear(old_gen);
+  }
+
+  CodeCache::gc_epilogue();
+  JvmtiExport::gc_epilogue();
+
+  // refs processing: clean slate
+  set_ref_processor(NULL);
+
+  // Update heap occupancy information which is used as
+  // input to soft ref clearing policy at the next gc.
+  Universe::update_heap_info_at_gc();
+
+  // Update time of last gc for all generations we collected
+  // (which currently is all the generations in the heap).
+  // We need to use a monotonically non-decreasing time in ms
+  // or we will see time-warp warnings and os::javaTimeMillis()
+  // does not guarantee monotonicity.
+  jlong now = os::javaTimeNanos() / NANOSECS_PER_MILLISEC;
+  gch->update_time_of_last_gc(now);
+
+  gch->trace_heap_after_gc(_gc_tracer);
+}
+```
+## 标记存活对象
+mark_phase_1:
+```cpp
+void GenMarkSweep::mark_sweep_phase1(bool clear_all_softrefs) {
+  // Recursively traverse all live objects and mark them
+  GCTraceTime(Info, gc, phases) tm("Phase 1: Mark live objects", _gc_timer);
+
+  GenCollectedHeap* gch = GenCollectedHeap::heap();
+
+  // Because follow_root_closure is created statically, cannot
+  // use OopsInGenClosure constructor which takes a generation,
+  // as the Universe has not been created when the static constructors
+  // are run.
+  follow_root_closure.set_orig_generation(gch->old_gen());
+
+  // Need new claim bits before marking starts.
+  ClassLoaderDataGraph::clear_claimed_marks();
+
+  {
+    StrongRootsScope srs(1);
+
+    gch->full_process_roots(&srs,
+                            false, // not the adjust phase
+                            GenCollectedHeap::SO_None,
+                            ClassUnloading, // only strong roots if ClassUnloading
+                                            // is enabled
+                            &follow_root_closure,
+                            &follow_cld_closure);
+  }
+
+  // Process reference objects found during marking
+  {
+    GCTraceTime(Debug, gc, phases) tm_m("Reference Processing", gc_timer());
+
+    ref_processor()->setup_policy(clear_all_softrefs);
+    ReferenceProcessorPhaseTimes pt(_gc_timer, ref_processor()->max_num_queues());
+    const ReferenceProcessorStats& stats =
+      ref_processor()->process_discovered_references(
+        &is_alive, &keep_alive, &follow_stack_closure, NULL, &pt);
+    pt.print_all_references();
+    gc_tracer()->report_gc_reference_stats(stats);
+  }
+
+  // This is the point where the entire marking should have completed.
+  assert(_marking_stack.is_empty(), "Marking should have completed");
+
+  {
+    GCTraceTime(Debug, gc, phases) tm_m("Weak Processing", gc_timer());
+    WeakProcessor::weak_oops_do(&is_alive, &do_nothing_cl);
+  }
+
+  {
+    GCTraceTime(Debug, gc, phases) tm_m("Class Unloading", gc_timer());
+
+    // Unload classes and purge the SystemDictionary.
+    bool purged_class = SystemDictionary::do_unloading(gc_timer());
+
+    // Unload nmethods.
+    CodeCache::do_unloading(&is_alive, purged_class);
+
+    // Prune dead klasses from subklass/sibling/implementor lists.
+    Klass::clean_weak_klass_links(purged_class);
+  }
+
+  {
+    GCTraceTime(Debug, gc, phases) t("Scrub String Table", gc_timer());
+    // Delete entries for dead interned strings.
+    StringTable::unlink(&is_alive);
+  }
+
+  {
+    GCTraceTime(Debug, gc, phases) t("Scrub Symbol Table", gc_timer());
+    // Clean up unreferenced symbols in symbol table.
+    SymbolTable::unlink();
+  }
+
+  gc_tracer()->report_object_count_after_gc(&is_alive);
+}
+```
+
+## 遍历GC Root
+JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法。GC模块有很多闭包(closure)，它们代表的是一段代码、一种行为。root_closure就是一个`MarkSweep::FollowRootClosure`闭包。这个闭包很强大，给它一个对象，就能标记这个对象，迭代标记对象的成员，以及对象所在的栈的所有对象及其成员：
+```cpp
+// hotspot\share\gc\serial\markSweep.inline.hpp
+void MarkSweep::FollowRootClosure::do_oop(oop* p)       { follow_root(p); }
+
+template <class T> inline void MarkSweep::follow_root(T* p) {
+  // 如果引用指向的对象不为空且未标记
+  T heap_oop = RawAccess<>::oop_load(p);
+  if (!CompressedOops::is_null(heap_oop)) {
+    oop obj = CompressedOops::decode_not_null(heap_oop);
+    if (!obj->mark_raw()->is_marked()) {
+      mark_object(obj);   // 标记对象
+      follow_object(obj); // 标记对象的成员 
+    }
+  }
+  follow_stack();       // 标记引用所在栈
+}
+
+// 如果对象是数组对象则标记数组，否则标记对象的成员
+inline void MarkSweep::follow_object(oop obj) {
+  if (obj->is_objArray()) {
+    MarkSweep::follow_array((objArrayOop)obj);
+  } else {
+    obj->oop_iterate(&mark_and_push_closure);
+  }
+}
+
+// 标记引用所在的整个栈
+void MarkSweep::follow_stack() {
+  do {
+    // 如果待标记栈不为空则逐个标记
+    while (!_marking_stack.is_empty()) {
+      oop obj = _marking_stack.pop();
+      follow_object(obj);
+    }
+    // 如果对象数组栈不为空则逐个标记
+    if (!_objarray_stack.is_empty()) {
+      ObjArrayTask task = _objarray_stack.pop();
+      follow_array_chunk(objArrayOop(task.obj()), task.index());
+    }
+  } while (!_marking_stack.is_empty() || !_objarray_stack.is_empty());
+}
+
+// 标记数组的类型的Class和数组成员，比如String[] p = new String[2]
+// 对p标记会同时标记java.lang.Class，p[1],p[2]
+inline void MarkSweep::follow_array(objArrayOop array) {
+  MarkSweep::follow_klass(array->klass());
+  if (array->length() > 0) {
+    MarkSweep::push_objarray(array, 0);
+  }
+}
+```
+GC Root有很多，有的是我们耳熟能详的，有的则是略微少见，它们都包含可进行标记的引用，会视情况进行STW标记或者并发标记：
++ 所有已加载的类(`ClassLoaderDataGraph::roots_cld_do`)
++ 所有Java线程当前栈帧的应用(`Threads::possibly_parallel_oops_do`)
++ JVM内部使用的引用(`Universe::oopds_do`和`SystemDictionary::oops_do`)
++ JNI handles(`JNIHandles::oops_do`)
++ 所有synchronized锁住的对象引用(`ObjectSynchronizer::oops_do`)
++ java.lang.management对象(`Management::oops_do`)
++ JVMTI导出(`JvmtiExport::oops_do`)
++ AOT加载器的堆(`AOTLoader::oops_do`)
++ code cache(`CodeCache::blobs_do`)
++ String常量池(`StringTable::oops_do`)
+
+```cpp
+void GenCollectedHeap::process_roots(StrongRootsScope* scope,
+                                     ScanningOption so,
+                                     OopClosure* strong_roots,
+                                     CLDClosure* strong_cld_closure,
+                                     CLDClosure* weak_cld_closure,
+                                     CodeBlobToOopClosure* code_roots) {
+  // General roots.
+  assert(Threads::thread_claim_parity() != 0, "must have called prologue code");
+  assert(code_roots != NULL, "code root closure should always be set");
+  // _n_termination for _process_strong_tasks should be set up stream
+  // in a method not running in a GC worker.  Otherwise the GC worker
+  // could be trying to change the termination condition while the task
+  // is executing in another GC worker.
+
+  if (_process_strong_tasks->try_claim_task(GCH_PS_ClassLoaderDataGraph_oops_do)) {
+    ClassLoaderDataGraph::roots_cld_do(strong_cld_closure, weak_cld_closure);
+  }
+
+  // Only process code roots from thread stacks if we aren't visiting the entire CodeCache anyway
+  CodeBlobToOopClosure* roots_from_code_p = (so & SO_AllCodeCache) ? NULL : code_roots;
+
+  bool is_par = scope->n_threads() > 1;
+  Threads::possibly_parallel_oops_do(is_par, strong_roots, roots_from_code_p);
+
+  if (_process_strong_tasks->try_claim_task(GCH_PS_Universe_oops_do)) {
+    Universe::oops_do(strong_roots);
+  }
+  // Global (strong) JNI handles
+  if (_process_strong_tasks->try_claim_task(GCH_PS_JNIHandles_oops_do)) {
+    JNIHandles::oops_do(strong_roots);
+  }
+
+  if (_process_strong_tasks->try_claim_task(GCH_PS_ObjectSynchronizer_oops_do)) {
+    ObjectSynchronizer::oops_do(strong_roots);
+  }
+  if (_process_strong_tasks->try_claim_task(GCH_PS_Management_oops_do)) {
+    Management::oops_do(strong_roots);
+  }
+  if (_process_strong_tasks->try_claim_task(GCH_PS_jvmti_oops_do)) {
+    JvmtiExport::oops_do(strong_roots);
+  }
+  if (UseAOT && _process_strong_tasks->try_claim_task(GCH_PS_aot_oops_do)) {
+    AOTLoader::oops_do(strong_roots);
+  }
+
+  if (_process_strong_tasks->try_claim_task(GCH_PS_SystemDictionary_oops_do)) {
+    SystemDictionary::oops_do(strong_roots);
+  }
+
+  if (_process_strong_tasks->try_claim_task(GCH_PS_CodeCache_oops_do)) {
+    if (so & SO_ScavengeCodeCache) {
+      assert(code_roots != NULL, "must supply closure for code cache");
+
+      // We only visit parts of the CodeCache when scavenging.
+      CodeCache::scavenge_root_nmethods_do(code_roots);
+    }
+    if (so & SO_AllCodeCache) {
+      assert(code_roots != NULL, "must supply closure for code cache");
+
+      // CMSCollector uses this to do intermediate-strength collections.
+      // We scan the entire code cache, since CodeCache::do_unloading is not called.
+      CodeCache::blobs_do(code_roots);
+    }
+    // Verify that the code cache contents are not subject to
+    // movement by a scavenging collection.
+    DEBUG_ONLY(CodeBlobToOopClosure assert_code_is_non_scavengable(&assert_is_non_scavengable_closure, !CodeBlobToOopClosure::FixRelocations));
+    DEBUG_ONLY(CodeCache::asserted_non_scavengable_nmethods_do(&assert_code_is_non_scavengable));
+  }
+}
+
+void GenCollectedHeap::process_string_table_roots(StrongRootsScope* scope,
+                                                  OopClosure* root_closure,
+                                                  OopStorage::ParState<false, false>* par_state_string) {
+  if (scope->n_threads() > 1) {
+    StringTable::possibly_parallel_oops_do(par_state_string, root_closure);
+  } else {
+    StringTable::oops_do(root_closure);
+  }
+}
+```
