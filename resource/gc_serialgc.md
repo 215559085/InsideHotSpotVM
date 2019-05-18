@@ -270,7 +270,7 @@ inline void MarkSweep::mark_object(oop obj) {
           [ptr             | 10]  monitor            碰撞锁
           [ptr             | 11]  marked             GC标记
 ```
-原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示碰撞锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留GC标志。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见，它们都包含可进行标记的引用，会视情况进行单线程标记或者并发标记：
+原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示碰撞锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留GC标志。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见：
 
 + 所有已加载的类(`ClassLoaderDataGraph::roots_cld_do`)
 + 所有Java线程当前栈帧的引用和虚拟机内部线程(`Threads::possibly_parallel_oops_do`)
@@ -283,7 +283,7 @@ inline void MarkSweep::mark_object(oop obj) {
 + code cache(`CodeCache::blobs_do`)
 + String常量池(`StringTable::oops_do`)
 
-最后JVM使用CAS(Atomic::cmpxchg)自旋锁等待标记任务。如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
+它们都包含可进行标记的引用，会视情况进行单线程标记或者并发标记，JVM会使用CAS(Atomic::cmpxchg)自旋锁等待标记任务。如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
 
 ### 1.2 处理java.lang.ref.*特殊引用类型(ReferenceProcessor)
 当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对特殊引用类型做一些处理。所谓特殊引用类型即：
@@ -319,3 +319,98 @@ size_t ReferenceProcessor::process_final_keep_alive_work(DiscoveredList& refs_li
 
 
 ## 1. 阶段2：计算对象新地址
+```js
+GenMarkSweep::mark_sweep_phase2
+  ->GenCollectedHeap::prepare_for_compaction
+    ->具体分代::prepare_for_compaction
+```
+因为新生代和老年代还是有差异，比如老年代只有一个空间，新生代有eden，from，to，所以
+GenCollectedHeap::prepare_for_compaction会根据具体的分代迭代所有空间进行处理，但是处理的方法是通用的：
+```cpp
+// hotspot\share\gc\shared\space.inline.hpp
+template <class SpaceType>
+inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* cp) {
+  // Compute the new addresses for the live objects and store it in the mark
+  // Used by universe::mark_sweep_phase2()
+
+  // We're sure to be here before any objects are compacted into this
+  // space, so this is a good time to initialize this:
+  space->set_compaction_top(space->bottom());
+
+  if (cp->space == NULL) {
+    assert(cp->gen != NULL, "need a generation");
+    assert(cp->threshold == NULL, "just checking");
+    assert(cp->gen->first_compaction_space() == space, "just checking");
+    cp->space = cp->gen->first_compaction_space();
+    cp->threshold = cp->space->initialize_threshold();
+    cp->space->set_compaction_top(cp->space->bottom());
+  }
+
+  HeapWord* compact_top = cp->space->compaction_top(); // This is where we are currently compacting to.
+
+  DeadSpacer dead_spacer(space);
+
+  HeapWord*  end_of_live = space->bottom();  // One byte beyond the last byte of the last live object.
+  HeapWord*  first_dead = NULL; // The first dead object.
+
+  const intx interval = PrefetchScanIntervalInBytes;
+
+  HeapWord* cur_obj = space->bottom();
+  HeapWord* scan_limit = space->scan_limit();
+
+  while (cur_obj < scan_limit) {
+    assert(!space->scanned_block_is_obj(cur_obj) ||
+           oop(cur_obj)->mark_raw()->is_marked() || oop(cur_obj)->mark_raw()->is_unlocked() ||
+           oop(cur_obj)->mark_raw()->has_bias_pattern(),
+           "these are the only valid states during a mark sweep");
+    if (space->scanned_block_is_obj(cur_obj) && oop(cur_obj)->is_gc_marked()) {
+      // prefetch beyond cur_obj
+      Prefetch::write(cur_obj, interval);
+      size_t size = space->scanned_block_size(cur_obj);
+      compact_top = cp->space->forward(oop(cur_obj), size, cp, compact_top);
+      cur_obj += size;
+      end_of_live = cur_obj;
+    } else {
+      // run over all the contiguous dead objects
+      HeapWord* end = cur_obj;
+      do {
+        // prefetch beyond end
+        Prefetch::write(end, interval);
+        end += space->scanned_block_size(end);
+      } while (end < scan_limit && (!space->scanned_block_is_obj(end) || !oop(end)->is_gc_marked()));
+
+      // see if we might want to pretend this object is alive so that
+      // we don't have to compact quite as often.
+      if (cur_obj == compact_top && dead_spacer.insert_deadspace(cur_obj, end)) {
+        oop obj = oop(cur_obj);
+        compact_top = cp->space->forward(obj, obj->size(), cp, compact_top);
+        end_of_live = end;
+      } else {
+        // otherwise, it really is a free region.
+
+        // cur_obj is a pointer to a dead object. Use this dead memory to store a pointer to the next live object.
+        *(HeapWord**)cur_obj = end;
+
+        // see if this is the first dead region.
+        if (first_dead == NULL) {
+          first_dead = cur_obj;
+        }
+      }
+
+      // move on to the next object
+      cur_obj = end;
+    }
+  }
+
+  assert(cur_obj == scan_limit, "just checking");
+  space->_end_of_live = end_of_live;
+  if (first_dead != NULL) {
+    space->_first_dead = first_dead;
+  } else {
+    space->_first_dead = end_of_live;
+  }
+
+  // save the compaction_top of the compaction space.
+  cp->space->set_compaction_top(compact_top);
+}
+```
