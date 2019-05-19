@@ -267,10 +267,10 @@ inline void MarkSweep::mark_object(oop obj) {
 最后的lock2位有不同含义：
           [ptr             | 00]  locked             ptr指向栈上真正的对象头
           [header      | 0 | 01]  unlocked           普通对象头
-          [ptr             | 10]  monitor            碰撞锁
+          [ptr             | 10]  monitor            膨胀锁
           [ptr             | 11]  marked             GC标记
 ```
-原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示碰撞锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留GC标志。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见：
+原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示膨胀锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留GC标志。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见：
 
 + 所有已加载的类(`ClassLoaderDataGraph::roots_cld_do`)
 + 所有Java线程当前栈帧的引用和虚拟机内部线程(`Threads::possibly_parallel_oops_do`)
@@ -319,39 +319,47 @@ size_t ReferenceProcessor::process_final_keep_alive_work(DiscoveredList& refs_li
 
 
 ## 1. 阶段2：计算对象新地址
-```js
-GenMarkSweep::mark_sweep_phase2
-  ->GenCollectedHeap::prepare_for_compaction
-    ->具体分代::prepare_for_compaction
+Serail GC的老年代第二阶段计算对象新地址使用的是Donald E. Knuth提出的Lisp2算法。
+
+![](gc_mark_compact_forward.png)
+
+计算新地址伪代码如下:
+```cpp
+while(cur_obj<space_end){
+  if(cur_obj->is_gc_marked()){
+    // 如果cur_Obj当前指向已标记过的对象，就计算新的地址
+    int object_size += cur_obj->size();
+    cur_obj->new_address = compact_top;
+    compact_top = cur_obj;
+    cur_obj += object_size;
+  }else{
+    // 否则快速跳过未标记的连续空间
+    while(cur_obj<space_end &&!cur_obj->is_gc_marked()){
+      cur_obj += cur_obj->size();
+    }
+  }
+}
 ```
-因为新生代和老年代还是有差异，比如老年代只有一个空间，新生代有eden，from，to，所以
-GenCollectedHeap::prepare_for_compaction会根据具体的分代迭代所有空间进行处理，但是处理的方法是通用的：
+它的思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top变成当前cur_obj，cur_obj继续推进，直至到达地址空间结束。
+
+有了上面的认识，对应到HotSpot实现也比较简单了。计算对象新地址的代码位于CompactibleSpace::scan_and_forward:
 ```cpp
 // hotspot\share\gc\shared\space.inline.hpp
 template <class SpaceType>
 inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* cp) {
-  // Compute the new addresses for the live objects and store it in the mark
-  // Used by universe::mark_sweep_phase2()
-
-  // We're sure to be here before any objects are compacted into this
-  // space, so this is a good time to initialize this:
   space->set_compaction_top(space->bottom());
 
   if (cp->space == NULL) {
-    assert(cp->gen != NULL, "need a generation");
-    assert(cp->threshold == NULL, "just checking");
-    assert(cp->gen->first_compaction_space() == space, "just checking");
     cp->space = cp->gen->first_compaction_space();
     cp->threshold = cp->space->initialize_threshold();
     cp->space->set_compaction_top(cp->space->bottom());
   }
-
-  HeapWord* compact_top = cp->space->compaction_top(); // This is where we are currently compacting to.
-
+  // 设置compact_top为连续空间开始地址
+  HeapWord* compact_top = cp->space->compaction_top(); 
   DeadSpacer dead_spacer(space);
 
-  HeapWord*  end_of_live = space->bottom();  // One byte beyond the last byte of the last live object.
-  HeapWord*  first_dead = NULL; // The first dead object.
+  HeapWord*  end_of_live = space->bottom(); //最后一个标记对象
+  HeapWord*  first_dead = NULL; // 第一个未标记对象
 
   const intx interval = PrefetchScanIntervalInBytes;
 
@@ -359,28 +367,26 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
   HeapWord* scan_limit = space->scan_limit();
 
   while (cur_obj < scan_limit) {
-    assert(!space->scanned_block_is_obj(cur_obj) ||
-           oop(cur_obj)->mark_raw()->is_marked() || oop(cur_obj)->mark_raw()->is_unlocked() ||
-           oop(cur_obj)->mark_raw()->has_bias_pattern(),
-           "these are the only valid states during a mark sweep");
+    // 如果cur_obj指向已标记对象
     if (space->scanned_block_is_obj(cur_obj) && oop(cur_obj)->is_gc_marked()) {
-      // prefetch beyond cur_obj
       Prefetch::write(cur_obj, interval);
       size_t size = space->scanned_block_size(cur_obj);
+      // 给cur_obj指向的对象设置新地址，并修改compact_top
+      // 为当前cur_obj所指地址
       compact_top = cp->space->forward(oop(cur_obj), size, cp, compact_top);
+      // cur_obj指针前移
       cur_obj += size;
+      // 修改最后存活对象指针地址
       end_of_live = cur_obj;
     } else {
-      // run over all the contiguous dead objects
+      // 如果cur_obj指向未标记对象，则快速跳过未标记的连续空间
       HeapWord* end = cur_obj;
       do {
-        // prefetch beyond end
         Prefetch::write(end, interval);
         end += space->scanned_block_size(end);
       } while (end < scan_limit && (!space->scanned_block_is_obj(end) || !oop(end)->is_gc_marked()));
 
-      // see if we might want to pretend this object is alive so that
-      // we don't have to compact quite as often.
+ 
       if (cur_obj == compact_top && dead_spacer.insert_deadspace(cur_obj, end)) {
         oop obj = oop(cur_obj);
         compact_top = cp->space->forward(obj, obj->size(), cp, compact_top);
@@ -397,13 +403,11 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
         }
       }
 
-      // move on to the next object
+      // cur_obj指针前移
       cur_obj = end;
     }
   }
 
-  assert(cur_obj == scan_limit, "just checking");
-  space->_end_of_live = end_of_live;
   if (first_dead != NULL) {
     space->_first_dead = first_dead;
   } else {
@@ -412,5 +416,50 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
 
   // save the compaction_top of the compaction space.
   cp->space->set_compaction_top(compact_top);
+}
+```
+```cpp
+HeapWord* CompactibleSpace::forward(oop q, size_t size,
+                                    CompactPoint* cp, HeapWord* compact_top) {
+  // q is alive
+  // First check if we should switch compaction space
+  assert(this == cp->space, "'this' should be current compaction space.");
+  size_t compaction_max_size = pointer_delta(end(), compact_top);
+  while (size > compaction_max_size) {
+    // switch to next compaction space
+    cp->space->set_compaction_top(compact_top);
+    cp->space = cp->space->next_compaction_space();
+    if (cp->space == NULL) {
+      cp->gen = GenCollectedHeap::heap()->young_gen();
+      assert(cp->gen != NULL, "compaction must succeed");
+      cp->space = cp->gen->first_compaction_space();
+      assert(cp->space != NULL, "generation must have a first compaction space");
+    }
+    compact_top = cp->space->bottom();
+    cp->space->set_compaction_top(compact_top);
+    cp->threshold = cp->space->initialize_threshold();
+    compaction_max_size = pointer_delta(cp->space->end(), compact_top);
+  }
+
+  // store the forwarding pointer into the mark word
+  if ((HeapWord*)q != compact_top) {
+    q->forward_to(oop(compact_top));
+    assert(q->is_gc_marked(), "encoding the pointer should preserve the mark");
+  } else {
+    // if the object isn't moving we can just set the mark to the default
+    // mark and handle it specially later on.
+    q->init_mark_raw();
+    assert(q->forwardee() == NULL, "should be forwarded to NULL");
+  }
+
+  compact_top += size;
+
+  // we need to update the offset table so that the beginnings of objects can be
+  // found during scavenge.  Note that we are updating the offset table based on
+  // where the object will be once the compaction phase finishes.
+  if (compact_top > cp->threshold)
+    cp->threshold =
+      cp->space->cross_threshold(compact_top - size, compact_top);
+  return compact_top;
 }
 ```
