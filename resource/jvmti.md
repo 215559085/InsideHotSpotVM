@@ -1,4 +1,4 @@
-# [Inside HotSpot] JVMTI
+# JVMTI(JVM Tool Interface)
 
 ## 1. 最简示例
 JVMTI(JVM Tool Interface)提供给外部提供一个接口让外部可以查看虚拟机内部的状态或者控制虚拟机一些行为。首先来一个最简示例：

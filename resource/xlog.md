@@ -1,4 +1,4 @@
-# [Inside HotSpot] JVM新日志接口-Xlog
+# JVM新日志接口-Xlog
 
 JVM的日志记录比较杂乱，为此[JEP158](http://openjdk.java.net/jeps/158)引入了统一的日志记录接口`-Xlog`。该接口可以分级别，分组件，分等级的记录用户想要的信息。
 它的详细语法如下：

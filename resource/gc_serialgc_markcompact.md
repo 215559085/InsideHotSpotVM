@@ -1,38 +1,7 @@
-# [Inside HotSpot] Serial GC
+# [Inside HotSpot] 老年代Full GC的标记-压缩算法
 
-## 1. 脑动触发垃圾回收
-我们有这样一个类：
-```java
-class Foo{
-    private static int _1MB = 1024*1024;
-
-    private byte[] b = new byte[_1MB*40];
-}
-```
-为了深入理解JVM Serial GC工作过程，还得"精心"安排一下Java堆划分：
-```js
--Xmx100m -Xms100m -Xmn40m -Xlog:gc* -XX:+UseSerialGC
------------------------------------------------------
-Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
-  def new generation   total 36864K, used 3277K
-   eden space 32768K,  10% used
-   from space 4096K,   0% used
-   to   space 4096K,   0% used 
-  tenured generation   total 61440K, used 40960K 
-    the space 61440K,  66% used 
-  Metaspace       used 572K, capacity 4500K, committed 4864K, reserved 1056768K
-   class space    used 48K, capacity 388K, committed 512K, reserved 1048576K
-```
-上面的参数将设置新生代为40m，老年代为60m，然后使用Serial GC并输出gc信息，另外`-Xlog:gc`表示输出最基本的GC信息，`-Xlog:gc*`表示输出详细GC信息，`-Xlog:gc*=trace`表示输出最详细信息，包括卡表建立，引用地址等，不过这不适用于production级虚拟机。
-再看看Foo对象，它占用40M空间，为了触发Full GC，可以new两个Foo：
-```java
-public class GCBaby {
-    public static void main(String[] args) {
-       new Foo();new Foo();
-    }
-}
-```
-编译执行，得到输出：
+## 0. Serial垃圾回收器的Full GC
+Serial垃圾回收器老年代（TenuredGeneration）的Full GC使用标记-压缩(Mark-Compact)进行垃圾回收，该算法基于Donald E. Knuth提出的Lisp2算法。我们可以使用`-Xlog:gc*`得到较为详细的GC日志：
 ```js
  Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
  GC(0) Pause Young (Allocation Failure)
@@ -51,146 +20,18 @@ public class GCBaby {
  GC(0) Metaspace: 562K->562K(1056768K)
  GC(0) Pause Young (Allocation Failure) 42M->0M(96M) 3.711ms
  GC(0) User=0.00s Sys=0.00s Real=0.00s
-
-  def new generation   total 36864K, used 1638K 
-   eden space 32768K,   5% used 
-   from space 4096K,   0% used 
-   to   space 4096K,   0% used 
-  tenured generation   total 61440K, used 41755K
-    the space 61440K,  67% used 
-  Metaspace       used 608K, capacity 4500K, committed 4864K, reserved 1056768K
-   class space    used 51K, capacity 388K, committed 512K, reserved 1048576K
 ```
-这时候老年代使用了40M，说明Full GC清除了一个Foo，还剩下一个Foo()。上面的日志则是GC的详细过程，这篇文章将围绕上述过程展开。
+标记-压缩分为四个阶段（如果是fastdebug版jvm，可以使用`-Xlog:gc*=trace`得到更为详细的日志，不过可能详细过头了...），这篇文章将围绕四个阶段展开。
 
-## 2. 久任代的Full GC
-```cpp
-// hotspot\share\gc\serial\genMarkSweep.cpp
-void TenuredGeneration::collect(bool   full,
-                                bool   clear_all_soft_refs,
-                                size_t size,
-                                bool   is_tlab) {
-  GenCollectedHeap* gch = GenCollectedHeap::heap();
-
-  // Temporarily expand the span of our ref processor, so
-  // refs discovery is over the entire heap, not just this generation
-  ReferenceProcessorSpanMutator
-    x(ref_processor(), gch->reserved_region());
-
-  STWGCTimer* gc_timer = GenMarkSweep::gc_timer();
-  gc_timer->register_gc_start();
-
-  SerialOldTracer* gc_tracer = GenMarkSweep::gc_tracer();
-  gc_tracer->report_gc_start(gch->gc_cause(), gc_timer->gc_start());
-
-  gch->pre_full_gc_dump(gc_timer);
-
-  GenMarkSweep::invoke_at_safepoint(ref_processor(), clear_all_soft_refs);
-
-  gch->post_full_gc_dump(gc_timer);
-
-  gc_timer->register_gc_end();
-
-  gc_tracer->report_gc_end(gc_timer->gc_end(), gc_timer->time_partitions());
-}
-```
-
-```cpp
-// hotspot\share\gc\serial\genMarkSweep.cpp
-void GenMarkSweep::invoke_at_safepoint(ReferenceProcessor* rp, bool clear_all_softrefs) {
-  GenCollectedHeap* gch = GenCollectedHeap::heap();
-
-  // hook up weak ref data so it can be used during Mark-Sweep
-  assert(ref_processor() == NULL, "no stomping");
-  assert(rp != NULL, "should be non-NULL");
-  set_ref_processor(rp);
-  rp->setup_policy(clear_all_softrefs);
-
-  gch->trace_heap_before_gc(_gc_tracer);
-
-  // When collecting the permanent generation Method*s may be moving,
-  // so we either have to flush all bcp data or convert it into bci.
-  CodeCache::gc_prologue();
-
-  // Increment the invocation count
-  _total_invocations++;
-
-  // Capture used regions for each generation that will be
-  // subject to collection, so that card table adjustments can
-  // be made intelligently (see clear / invalidate further below).
-  gch->save_used_regions();
-
-  allocate_stacks();
-
-  mark_sweep_phase1(clear_all_softrefs);
-
-  mark_sweep_phase2();
-
-  // Don't add any more derived pointers during phase3
-#if COMPILER2_OR_JVMCI
-  assert(DerivedPointerTable::is_active(), "Sanity");
-  DerivedPointerTable::set_active(false);
-#endif
-
-  mark_sweep_phase3();
-
-  mark_sweep_phase4();
-
-  restore_marks();
-
-  // Set saved marks for allocation profiler (and other things? -- dld)
-  // (Should this be in general part?)
-  gch->save_marks();
-
-  deallocate_stacks();
-
-  // If compaction completely evacuated the young generation then we
-  // can clear the card table.  Otherwise, we must invalidate
-  // it (consider all cards dirty).  In the future, we might consider doing
-  // compaction within generations only, and doing card-table sliding.
-  CardTableRS* rs = gch->rem_set();
-  Generation* old_gen = gch->old_gen();
-
-  // Clear/invalidate below make use of the "prev_used_regions" saved earlier.
-  if (gch->young_gen()->used() == 0) {
-    // We've evacuated the young generation.
-    rs->clear_into_younger(old_gen);
-  } else {
-    // Invalidate the cards corresponding to the currently used
-    // region and clear those corresponding to the evacuated region.
-    rs->invalidate_or_clear(old_gen);
-  }
-
-  CodeCache::gc_epilogue();
-  JvmtiExport::gc_epilogue();
-
-  // refs processing: clean slate
-  set_ref_processor(NULL);
-
-  // Update heap occupancy information which is used as
-  // input to soft ref clearing policy at the next gc.
-  Universe::update_heap_info_at_gc();
-
-  // Update time of last gc for all generations we collected
-  // (which currently is all the generations in the heap).
-  // We need to use a monotonically non-decreasing time in ms
-  // or we will see time-warp warnings and os::javaTimeMillis()
-  // does not guarantee monotonicity.
-  jlong now = os::javaTimeNanos() / NANOSECS_PER_MILLISEC;
-  gch->update_time_of_last_gc(now);
-
-  gch->trace_heap_after_gc(_gc_tracer);
-}
-```
 ## 1. 阶段1：标记存活对象
-Serial GC的Full GC第一阶段对应GC日志的
+第一阶段对应GC日志的
 ```js
  GC(1) Phase 1: Mark live objects
 ```
 它会遍历GC Root标记可达对象，处理`java.lang.ref.*`特殊引用类型，清除字符串常量池无效字符串等等，这一阶段占用了标记清除大部分的时间。下面是阶段一最重要的小步骤。
 
 ### 1.1 遍历GC Root(process_roots())
-JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法。GC模块有很多闭包(closure)，它们代表的是一段代码、一种行为。root_closure就是一个`MarkSweep::FollowRootClosure`闭包。这个闭包很强大，给它一个对象，就能标记这个对象，迭代标记对象的成员，以及对象所在的栈的所有对象及其成员：
+JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法(闭包)。GC模块有很多闭包(closure)，它们代表的是一段代码、一种行为。root_closure就是一个`MarkSweep::FollowRootClosure`闭包。这个闭包很强大，给它一个对象，就能标记这个对象，迭代标记对象的成员，以及对象所在的栈的所有对象及其成员：
 ```cpp
 // hotspot\share\gc\serial\markSweep.cpp
 void MarkSweep::FollowRootClosure::do_oop(oop* p)       { follow_root(p); }
@@ -316,10 +157,10 @@ size_t ReferenceProcessor::process_final_keep_alive_work(DiscoveredList& refs_li
 ```
 所以说重写了finalize()的方法不得不到析构的语义，还会耽误GC回收对象。
 
+## 2. 阶段2：计算对象新地址
 
-
-## 1. 阶段2：计算对象新地址
-Serail GC的老年代第二阶段计算对象新地址使用的是Donald E. Knuth提出的Lisp2算法。
+### 2.1 压缩算法思想
+压缩算法思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top变成当前cur_obj，cur_obj继续推进，直至到达地址空间结束。
 
 ![](gc_mark_compact_forward.png)
 
@@ -340,8 +181,8 @@ while(cur_obj<space_end){
   }
 }
 ```
-它的思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top变成当前cur_obj，cur_obj继续推进，直至到达地址空间结束。
 
+### 2.2 具体实现
 有了上面的认识，对应到HotSpot实现也比较简单了。计算对象新地址的代码位于CompactibleSpace::scan_and_forward:
 ```cpp
 // hotspot\share\gc\shared\space.inline.hpp
@@ -379,7 +220,7 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
       // 修改最后存活对象指针地址
       end_of_live = cur_obj;
     } else {
-      // 如果cur_obj指向未标记对象，则快速跳过未标记的连续空间
+      // 如果cur_obj指向未标记对象，则while快速跳过未标记的连续空间
       HeapWord* end = cur_obj;
       do {
         Prefetch::write(end, interval);
@@ -418,12 +259,12 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
   cp->space->set_compaction_top(compact_top);
 }
 ```
+### 2.3 计算新对象地址
 ```cpp
 HeapWord* CompactibleSpace::forward(oop q, size_t size,
                                     CompactPoint* cp, HeapWord* compact_top) {
   // q is alive
   // First check if we should switch compaction space
-  assert(this == cp->space, "'this' should be current compaction space.");
   size_t compaction_max_size = pointer_delta(end(), compact_top);
   while (size > compaction_max_size) {
     // switch to next compaction space
@@ -431,9 +272,7 @@ HeapWord* CompactibleSpace::forward(oop q, size_t size,
     cp->space = cp->space->next_compaction_space();
     if (cp->space == NULL) {
       cp->gen = GenCollectedHeap::heap()->young_gen();
-      assert(cp->gen != NULL, "compaction must succeed");
       cp->space = cp->gen->first_compaction_space();
-      assert(cp->space != NULL, "generation must have a first compaction space");
     }
     compact_top = cp->space->bottom();
     cp->space->set_compaction_top(compact_top);
@@ -441,25 +280,111 @@ HeapWord* CompactibleSpace::forward(oop q, size_t size,
     compaction_max_size = pointer_delta(cp->space->end(), compact_top);
   }
 
-  // store the forwarding pointer into the mark word
+  //如果对象需要移动，则设置新的mark word为compact_top所指
   if ((HeapWord*)q != compact_top) {
     q->forward_to(oop(compact_top));
-    assert(q->is_gc_marked(), "encoding the pointer should preserve the mark");
-  } else {
-    // if the object isn't moving we can just set the mark to the default
-    // mark and handle it specially later on.
+  } 
+  // 否则初始化mark word即可
+  else {
     q->init_mark_raw();
-    assert(q->forwardee() == NULL, "should be forwarded to NULL");
   }
-
+  
+  // compact_top前移
   compact_top += size;
 
-  // we need to update the offset table so that the beginnings of objects can be
-  // found during scavenge.  Note that we are updating the offset table based on
-  // where the object will be once the compaction phase finishes.
   if (compact_top > cp->threshold)
     cp->threshold =
       cp->space->cross_threshold(compact_top - size, compact_top);
   return compact_top;
+}
+```
+
+## 3. 阶段3：调整对象指针
+还记得第一阶段GC Root的标记行为吗？
+
+> JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法（闭包）。
+
+第三阶段和第一阶段一样，只是第一阶段传递的root_closure表示**标记存活对象**的闭包`FollowRootClosure`，第三阶段传递的root_closure表示**调整对象指针**的闭包`AdjustPointerClosure`：
+```cpp
+// hotspot\share\gc\serial\markSweep.inline.hpp
+inline void AdjustPointerClosure::do_oop(oop* p)       { do_oop_work(p); }
+template <typename T>
+void AdjustPointerClosure::do_oop_work(T* p)           { MarkSweep::adjust_pointer(p); }
+
+template <class T> inline void MarkSweep::adjust_pointer(T* p) {
+  T heap_oop = RawAccess<>::oop_load(p);
+  if (!CompressedOops::is_null(heap_oop)) {
+    // 从地址p处得到对象
+    oop obj = CompressedOops::decode_not_null(heap_oop);
+    // 从对象mark word中得到新对象地址
+    oop new_obj = oop(obj->mark_raw()->decode_pointer());
+    if (new_obj != NULL) {
+      // 将地址p处设置为新对象地址
+      RawAccess<IS_NOT_NULL>::oop_store(p, new_obj);
+    }
+  }
+}
+```
+`AdjustPointerClosure`闭包会遍历所有GC Root然后调整对象指针，注意，这里和第一阶段有个重要不同是第一阶段传递的`FollowRootClosure`闭包会从GC Root出发标记所有可达对象，但是`AdjustPointerClosure`闭包只会标记GC Root出发直接可达的对象，
+
+![](gc_adjust_ptr.png)
+
+从对象出发寻找可达其他对象这一步是使用的另一个闭包`GenAdjustPointersClosure`，它会遍历整个堆空间然后调整存活对象的指针。
+
+## 4. 阶段4：移动对象
+第四阶段传递`GenCompactClosure`闭包，该闭包负责对象的移动，移动的代码位于CompactibleSpace::scan_and_compact：
+```cpp
+template <class SpaceType>
+inline void CompactibleSpace::scan_and_compact(SpaceType* space) {
+  // 移动存活对象到新地址，该函数用于serial gc标记压缩算法第四步
+  
+  verify_up_to_first_dead(space);
+
+  HeapWord* const bottom = space->bottom();
+  HeapWord* const end_of_live = space->_end_of_live;
+
+  // 如果该区域所有对象都存活，或者没有任何对象，或者没有任何存活对象
+  // 就不需要进行移动
+  if (space->_first_dead == end_of_live && (bottom == end_of_live || !oop(bottom)->is_gc_marked())) {
+    clear_empty_region(space);
+    return;
+  }
+
+  const intx scan_interval = PrefetchScanIntervalInBytes;
+  const intx copy_interval = PrefetchCopyIntervalInBytes;
+
+  // 设置扫描指针cur_obj为空间底部
+  HeapWord* cur_obj = bottom;
+  if (space->_first_dead > cur_obj && !oop(cur_obj)->is_gc_marked()) {
+    // All object before _first_dead can be skipped. They should not be moved.
+    // A pointer to the first live object is stored at the memory location for _first_dead.
+    cur_obj = *(HeapWord**)(space->_first_dead);
+  }
+
+  // 从空间开始到最后一个存活对象为截止进行扫描
+  while (cur_obj < end_of_live) {
+    // 如果cur_obj执行的对象未标记
+    if (!oop(cur_obj)->is_gc_marked()) {
+      // 扫描指针快速移动至下一个存活的对象（死对象的第一个word
+      // 存放了下一个存活对象的地址，这样就可以快速移动）
+      cur_obj = *(HeapWord**)cur_obj;
+    } else {
+      Prefetch::read(cur_obj, scan_interval);
+
+      size_t size = space->obj_size(cur_obj);
+      // 获取对象将要被移动到的新地址
+      HeapWord* compaction_top = (HeapWord*)oop(cur_obj)->forwardee();
+      Prefetch::write(compaction_top, copy_interval);
+
+      // 移动对象，并初始化对象的mark word
+      Copy::aligned_conjoint_words(cur_obj, compaction_top, size);
+      oop(compaction_top)->init_mark_raw();
+
+      // 扫描指针前移
+      cur_obj += size;
+    }
+  }
+
+  clear_empty_region(space);
 }
 ```
