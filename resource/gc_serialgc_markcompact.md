@@ -1,7 +1,7 @@
 # [Inside HotSpot] 老年代Full GC的标记-压缩算法
 
 ## 0. Serial垃圾回收器的Full GC
-Serial垃圾回收器老年代（TenuredGeneration）的Full GC使用标记-压缩(Mark-Compact)进行垃圾回收，该算法基于Donald E. Knuth提出的Lisp2算法。我们可以使用`-Xlog:gc*`得到较为详细的GC日志：
+Serial垃圾回收器老年代（TenuredGeneration）的Full GC使用标记-压缩(Mark-Compact)进行垃圾回收，该算法基于Donald E. Knuth提出的Lisp2算法。老年代的GC始于`gc/serial/tenuredGeneration`的TenuredGeneration::collect，它会在GC前后记录一些日志，真正的标记压缩算法发生在GenMarkSweep::invoke_at_safepoint，我们可以使用`-Xlog:gc*`得到该算法的流程：
 ```js
  Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
  GC(0) Pause Young (Allocation Failure)
