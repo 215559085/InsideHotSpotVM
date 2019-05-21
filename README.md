@@ -24,7 +24,7 @@
 ## GC
 + [[Inside HotSpot] 安全点](resource/safepoint.md) **WIP**
 + [[Inside HotSpot] Java分代堆](resource/gc_heap_overview.md) **WIP**
-+ [[Inside HotSpot] Serial垃圾回收器Full GC](resource/gc_serialgc_markcompact.md) **WIP**
++ [[Inside HotSpot] Serial垃圾回收器Full GC](resource/gc_serialgc_markcompact.md)
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
