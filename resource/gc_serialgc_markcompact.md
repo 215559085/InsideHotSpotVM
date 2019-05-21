@@ -1,8 +1,8 @@
-# [Inside HotSpot] 老年代Full GC的标记-压缩算法
+# [Inside HotSpot] Serial垃圾回收器Full GC
 
-## 0. Serial垃圾回收器的Full GC
-Serial垃圾回收器老年代（TenuredGeneration）的Full GC使用标记-压缩(Mark-Compact)进行垃圾回收，该算法基于Donald E. Knuth提出的Lisp2算法。老年代的GC始于`gc/serial/tenuredGeneration`的TenuredGeneration::collect，它会在GC前后记录一些日志，真正的标记压缩算法发生在GenMarkSweep::invoke_at_safepoint，我们可以使用`-Xlog:gc*`得到该算法的流程：
-```js
+## 0. Serial垃圾回收器Full GC
+Serial垃圾回收器的Full GC使用标记-压缩(Mark-Compact)进行垃圾回收，该算法基于Donald E. Knuth提出的Lisp2算法，它会把所有存活对象滑动到空间的一端，所以也叫sliding compact。Full GC始于`gc/serial/tenuredGeneration`的TenuredGeneration::collect，它会在GC前后记录一些日志，真正的标记压缩算法发生在GenMarkSweep::invoke_at_safepoint，我们可以使用`-Xlog:gc*`得到该算法的流程：
+```bash
  Heap address: 0x00000000f9c00000, size: 100 MB, Compressed Oops mode: 32-bit
  GC(0) Pause Young (Allocation Failure)
  GC(1) Pause Full (Allocation Failure)
@@ -80,6 +80,11 @@ inline void MarkSweep::follow_array(objArrayOop array) {
   }
 }
 ```
+
+![](mark_compact_phase1_1.png)
+
+![](mark_compact_phase1_2.png)
+
 既然走到这里了不如看看JVM是如何标记对象的：
 ```cpp
 inline void MarkSweep::mark_object(oop obj) {
@@ -108,7 +113,7 @@ inline void MarkSweep::mark_object(oop obj) {
           [ptr             | 10]  monitor            膨胀锁
           [ptr             | 11]  marked             GC标记
 ```
-原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示膨胀锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留GC标志。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见：
+原来垃圾回收的标记就是对每个对象mark word最后两位置为11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示膨胀锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留对象的mark word（PreservedMark）。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见：
 
 + 所有已加载的类(`ClassLoaderDataGraph::roots_cld_do`)
 + 所有Java线程当前栈帧的引用和虚拟机内部线程(`Threads::possibly_parallel_oops_do`)
@@ -123,20 +128,18 @@ inline void MarkSweep::mark_object(oop obj) {
 
 它们都包含可进行标记的引用，会视情况进行单线程标记或者并发标记，JVM会使用CAS(Atomic::cmpxchg)自旋锁等待标记任务。如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
 
-当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对弱引用，软引用，虚引用，final引用根据他们的Java语义做特殊处理，不过这与本文算法本身没有太大关系，有兴趣的请自行了解。
+当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对弱引用，软引用，虚引用，final引用根据他们的Java语义做特殊处理，不过与算法本身没有太大关系，有兴趣的请自行了解。
 
-![](mark_compact_phase1_1.png)
-
-![](mark_compact_phase1_2.png)
 
 ## 2. 阶段2：计算对象新地址
 
-压缩算法思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top变成当前cur_obj，cur_obj继续推进，直至到达地址空间结束。
+就算对象新地址的思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top推进，cur_obj推进，直至cur_obj到达地址空间结束。
 
 ![](gc_mark_compact_forward.png)
 
 计算新地址伪代码如下:
 ```cpp
+// 扫描堆空间
 while(cur_obj<space_end){
   if(cur_obj->is_gc_marked()){
     // 如果cur_Obj当前指向已标记过的对象，就计算新的地址
@@ -225,7 +228,6 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
   cp->space->set_compaction_top(compact_top);
 }
 ```
-如果对象需要移动，`cp->space->forward()`会将新地址放入对象的mark word里面。计算对象新地址里面有个小技巧，比如当扫描到一片未存活对象的时候，它把第一个未存活对象设置为该片区域的结尾，这样下一次扫描到第一个对象可以直接跳到区域尾，节约时间。
 
 ![](mark_compact_phase2_1.png)
 
@@ -233,8 +235,14 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
 
 ![](mark_compact_phase2_3.png)
 
+如果对象需要移动，`cp->space->forward()`会将新地址放入对象的mark word里面。计算对象新地址里面有个小技巧，比如当扫描到一片未存活对象的时候，它把第一个未存活对象设置为该片区域的结尾，这样下一次扫描到第一个对象可以直接跳到区域尾，节约时间。
+
 ## 3. 阶段3：调整对象指针
-还记得第一阶段GC Root的标记行为吗？
+第二阶段设置了所有对象的新地址，但是没有改变对象的相对地址和GC Root。比如GC Root指向对象A，B，C，这时候A、B、C都有新地址A',B',C'，GC Root应该相应调整为指向A',B',C':
+
+![](mark_compact_phase3_1.png)
+
+第三阶段就是干这件事的。还记得第一阶段GC Root的标记行为吗？
 
 > JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法（闭包）。
 
@@ -295,7 +303,11 @@ inline void CompactibleSpace::scan_and_adjust_pointers(SpaceType* space) {
 ```
 
 ## 4. 阶段4：移动对象
-第四阶段传递`GenCompactClosure`闭包，该闭包负责对象的移动，移动的代码位于CompactibleSpace::scan_and_compact：
+第四阶段传递`GenCompactClosure`闭包，该闭包负责对象的移动：
+
+![](mark_compact_phase4_1.png)
+
+移动的代码位于CompactibleSpace::scan_and_compact：
 ```cpp
 //hotspot\share\gc\shared\space.inline.hpp
 template <class SpaceType>
@@ -318,10 +330,8 @@ inline void CompactibleSpace::scan_and_compact(SpaceType* space) {
 
   // 设置扫描指针cur_obj为空间底部
   HeapWord* cur_obj = bottom;
-  // 如果当前指向存活
+  // 跳到第一个存活的对象
   if (space->_first_dead > cur_obj && !oop(cur_obj)->is_gc_marked()) {
-    // All object before _first_dead can be skipped. They should not be moved.
-    // A pointer to the first live object is stored at the memory location for _first_dead.
     cur_obj = *(HeapWord**)(space->_first_dead);
   }
 
