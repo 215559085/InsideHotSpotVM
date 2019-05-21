@@ -28,9 +28,6 @@ Serial垃圾回收器老年代（TenuredGeneration）的Full GC使用标记-压�
 ```js
  GC(1) Phase 1: Mark live objects
 ```
-它会遍历GC Root标记可达对象，处理`java.lang.ref.*`特殊引用类型，清除字符串常量池无效字符串等等，这一阶段占用了标记清除大部分的时间。下面是阶段一最重要的小步骤。
-
-### 1.1 遍历GC Root(process_roots())
 JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法(闭包)。GC模块有很多闭包(closure)，它们代表的是一段代码、一种行为。root_closure就是一个`MarkSweep::FollowRootClosure`闭包。这个闭包很强大，给它一个对象，就能标记这个对象，迭代标记对象的成员，以及对象所在的栈的所有对象及其成员：
 ```cpp
 // hotspot\share\gc\serial\markSweep.cpp
@@ -126,40 +123,10 @@ inline void MarkSweep::mark_object(oop obj) {
 
 它们都包含可进行标记的引用，会视情况进行单线程标记或者并发标记，JVM会使用CAS(Atomic::cmpxchg)自旋锁等待标记任务。如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。
 
-### 1.2 处理java.lang.ref.*特殊引用类型(ReferenceProcessor)
-当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对特殊引用类型做一些处理。所谓特殊引用类型即：
-
-+ 弱引用：
-+ 软引用：
-+ 虚引用：
-+ final引用:重写了finalize()方法的引用。
-
-如果待回收队列里面存在final引用，就使用`DefNewGeneration::FastKeepAliveClosure`闭包将对象再次标记为存活，然后放入fianlize队列等待Java层面的FinalizeThread调用该对象的finalize()方法，当调用完成后下次GC该对象就会被老老实实回收：
-```cpp
-size_t ReferenceProcessor::process_final_keep_alive_work(DiscoveredList& refs_list,
-                                                         OopClosure*     keep_alive,
-                                                         VoidClosure*    complete_gc) {
-  DiscoveredListIterator iter(refs_list, keep_alive, NULL);
-  while (iter.has_next()) {
-    // 让引用关联的对象复活
-    iter.load_ptrs(DEBUG_ONLY(false /* allow_null_referent */));
-    iter.make_referent_alive();
-    java_lang_ref_Reference::set_next_raw(iter.obj(), iter.obj());
-    // 加入finalize队列等待FinalizeThread调用该对象的finalize方法
-    iter.enqueue();
-    iter.next();
-  }
-  iter.complete_enqueue();
-  complete_gc->do_void();
-  refs_list.clear();
-  return iter.removed();
-}
-```
-所以说重写了finalize()的方法不得不到析构的语义，还会耽误GC回收对象。
+当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对弱引用，软引用，虚引用，final引用根据他们的Java语义做特殊处理，不过这与本文算法本身没有太大关系，有兴趣的请自行了解。
 
 ## 2. 阶段2：计算对象新地址
 
-### 2.1 压缩算法思想
 压缩算法思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top变成当前cur_obj，cur_obj继续推进，直至到达地址空间结束。
 
 ![](gc_mark_compact_forward.png)
@@ -181,8 +148,6 @@ while(cur_obj<space_end){
   }
 }
 ```
-
-### 2.2 具体实现
 有了上面的认识，对应到HotSpot实现也比较简单了。计算对象新地址的代码位于CompactibleSpace::scan_and_forward:
 ```cpp
 // hotspot\share\gc\shared\space.inline.hpp
@@ -254,17 +219,13 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
   } else {
     space->_first_dead = end_of_live;
   }
-
-  // save the compaction_top of the compaction space.
   cp->space->set_compaction_top(compact_top);
 }
 ```
-### 2.3 计算新对象地址
+其中`cp->space->forward()`表示计算新对象地址：
 ```cpp
 HeapWord* CompactibleSpace::forward(oop q, size_t size,
                                     CompactPoint* cp, HeapWord* compact_top) {
-  // q is alive
-  // First check if we should switch compaction space
   size_t compaction_max_size = pointer_delta(end(), compact_top);
   while (size > compaction_max_size) {
     // switch to next compaction space
@@ -304,7 +265,7 @@ HeapWord* CompactibleSpace::forward(oop q, size_t size,
 
 > JVM在`process_string_table_roots()`和`process_roots()`中会遍历所有类型的GC Root，然后使用`XX::oops_do(root_closure)`从该GC Root出发标记所有存活对象。`XX`表示GC Root类型，`root_closure`表示**标记存活对象**的方法（闭包）。
 
-第三阶段和第一阶段一样，只是第一阶段传递的root_closure表示**标记存活对象**的闭包`FollowRootClosure`，第三阶段传递的root_closure表示**调整对象指针**的闭包`AdjustPointerClosure`：
+第三阶段和第一阶段一样，只是第一阶段传递的root_closure表示**标记存活对象**的闭包(`FollowRootClosure`)，第三阶段传递的root_closure表示**调整对象指针**的闭包`AdjustPointerClosure`：
 ```cpp
 // hotspot\share\gc\serial\markSweep.inline.hpp
 inline void AdjustPointerClosure::do_oop(oop* p)       { do_oop_work(p); }
@@ -329,18 +290,47 @@ template <class T> inline void MarkSweep::adjust_pointer(T* p) {
 
 ![](gc_adjust_ptr.png)
 
-从对象出发寻找可达其他对象这一步是使用的另一个闭包`GenAdjustPointersClosure`，它会遍历整个堆空间然后调整存活对象的指针。
+从对象出发寻找可达其他对象这一步是使用的另一个闭包`GenAdjustPointersClosure`，它会调用CompactibleSpace::scan_and_adjust_pointers遍历整个堆空间然后调整存活对象的指针：
+```cpp
+//hotspot\share\gc\shared\space.inline.hpp
+template <class SpaceType>
+inline void CompactibleSpace::scan_and_adjust_pointers(SpaceType* space) {
+  // 扫描指针
+  HeapWord* cur_obj = space->bottom();
+  // 最后一个标记对象
+  HeapWord* const end_of_live = space->_end_of_live;
+  // 第一个未标记对象
+  HeapWord* const first_dead = space->_first_dead; 
+  const intx interval = PrefetchScanIntervalInBytes;
+
+  // 扫描老年代
+  while (cur_obj < end_of_live) {
+    Prefetch::write(cur_obj, interval);
+    // 如果扫描指针指向的对象是存活对象
+    if (cur_obj < first_dead || oop(cur_obj)->is_gc_marked()) {
+      // 调整该对象指针，调整方法和AdjustPointerClosure所用一样
+      size_t size = MarkSweep::adjust_pointers(oop(cur_obj));
+      size = space->adjust_obj_size(size);
+      // 指针前移
+      cur_obj += size;
+    } else {
+      // 否则扫描指针指向未存活对象，设置扫描指针为下一个存活对象，加速前移
+      cur_obj = *(HeapWord**)cur_obj;
+    }
+  }
+}
+```
 
 ## 4. 阶段4：移动对象
 第四阶段传递`GenCompactClosure`闭包，该闭包负责对象的移动，移动的代码位于CompactibleSpace::scan_and_compact：
 ```cpp
+//hotspot\share\gc\shared\space.inline.hpp
 template <class SpaceType>
 inline void CompactibleSpace::scan_and_compact(SpaceType* space) {
-  // 移动存活对象到新地址，该函数用于serial gc标记压缩算法第四步
-  
   verify_up_to_first_dead(space);
-
+  // 老年代起始位置
   HeapWord* const bottom = space->bottom();
+  // 最后一个标记对象
   HeapWord* const end_of_live = space->_end_of_live;
 
   // 如果该区域所有对象都存活，或者没有任何对象，或者没有任何存活对象
@@ -355,6 +345,7 @@ inline void CompactibleSpace::scan_and_compact(SpaceType* space) {
 
   // 设置扫描指针cur_obj为空间底部
   HeapWord* cur_obj = bottom;
+  // 如果当前指向存活
   if (space->_first_dead > cur_obj && !oop(cur_obj)->is_gc_marked()) {
     // All object before _first_dead can be skipped. They should not be moved.
     // A pointer to the first live object is stored at the memory location for _first_dead.
