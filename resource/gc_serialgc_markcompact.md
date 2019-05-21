@@ -125,6 +125,10 @@ inline void MarkSweep::mark_object(oop obj) {
 
 当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对弱引用，软引用，虚引用，final引用根据他们的Java语义做特殊处理，不过这与本文算法本身没有太大关系，有兴趣的请自行了解。
 
+![](mark_compact_phase1_1.png)
+
+![](mark_compact_phase1_2.png)
+
 ## 2. 阶段2：计算对象新地址
 
 压缩算法思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top变成当前cur_obj，cur_obj继续推进，直至到达地址空间结束。
@@ -160,56 +164,55 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
     cp->threshold = cp->space->initialize_threshold();
     cp->space->set_compaction_top(cp->space->bottom());
   }
-  // 设置compact_top为连续空间开始地址
+  // compact_top为对象新地址的起始
   HeapWord* compact_top = cp->space->compaction_top(); 
   DeadSpacer dead_spacer(space);
-
-  HeapWord*  end_of_live = space->bottom(); //最后一个标记对象
-  HeapWord*  first_dead = NULL; // 第一个未标记对象
+  //最后一个标记对象
+  HeapWord*  end_of_live = space->bottom(); 
+  // 第一个未标记对象
+  HeapWord*  first_dead = NULL;
 
   const intx interval = PrefetchScanIntervalInBytes;
 
+  // 扫描指针
   HeapWord* cur_obj = space->bottom();
+  // 扫描终点
   HeapWord* scan_limit = space->scan_limit();
 
+  // 扫描老年代
   while (cur_obj < scan_limit) {
     // 如果cur_obj指向已标记对象
     if (space->scanned_block_is_obj(cur_obj) && oop(cur_obj)->is_gc_marked()) {
       Prefetch::write(cur_obj, interval);
       size_t size = space->scanned_block_size(cur_obj);
-      // 给cur_obj指向的对象设置新地址，并修改compact_top
-      // 为当前cur_obj所指地址
+      // 给cur_obj指向的对象设置新地址，并前移compact_top
       compact_top = cp->space->forward(oop(cur_obj), size, cp, compact_top);
       // cur_obj指针前移
       cur_obj += size;
       // 修改最后存活对象指针地址
       end_of_live = cur_obj;
     } else {
-      // 如果cur_obj指向未标记对象，则while快速跳过未标记的连续空间
+      // 如果cur_obj指向未标记对象，则获取这片（可能连续包含未标记对象的）空间的大小
       HeapWord* end = cur_obj;
       do {
         Prefetch::write(end, interval);
         end += space->scanned_block_size(end);
       } while (end < scan_limit && (!space->scanned_block_is_obj(end) || !oop(end)->is_gc_marked()));
 
- 
+      // 如果需要减少对象移动频率
       if (cur_obj == compact_top && dead_spacer.insert_deadspace(cur_obj, end)) {
         oop obj = oop(cur_obj);
         compact_top = cp->space->forward(obj, obj->size(), cp, compact_top);
         end_of_live = end;
       } else {
-        // otherwise, it really is a free region.
-
-        // cur_obj is a pointer to a dead object. Use this dead memory to store a pointer to the next live object.
+        // 否则跳过未存活对象
         *(HeapWord**)cur_obj = end;
-
-        // see if this is the first dead region.
+        // 如果first_dead为空则将这片空间设置为第一个未存活对象
         if (first_dead == NULL) {
           first_dead = cur_obj;
         }
       }
-
-      // cur_obj指针前移
+      // cur_obj指针快速前移
       cur_obj = end;
     }
   }
@@ -222,43 +225,13 @@ inline void CompactibleSpace::scan_and_forward(SpaceType* space, CompactPoint* c
   cp->space->set_compaction_top(compact_top);
 }
 ```
-其中`cp->space->forward()`表示计算新对象地址：
-```cpp
-HeapWord* CompactibleSpace::forward(oop q, size_t size,
-                                    CompactPoint* cp, HeapWord* compact_top) {
-  size_t compaction_max_size = pointer_delta(end(), compact_top);
-  while (size > compaction_max_size) {
-    // switch to next compaction space
-    cp->space->set_compaction_top(compact_top);
-    cp->space = cp->space->next_compaction_space();
-    if (cp->space == NULL) {
-      cp->gen = GenCollectedHeap::heap()->young_gen();
-      cp->space = cp->gen->first_compaction_space();
-    }
-    compact_top = cp->space->bottom();
-    cp->space->set_compaction_top(compact_top);
-    cp->threshold = cp->space->initialize_threshold();
-    compaction_max_size = pointer_delta(cp->space->end(), compact_top);
-  }
+如果对象需要移动，`cp->space->forward()`会将新地址放入对象的mark word里面。计算对象新地址里面有个小技巧，比如当扫描到一片未存活对象的时候，它把第一个未存活对象设置为该片区域的结尾，这样下一次扫描到第一个对象可以直接跳到区域尾，节约时间。
 
-  //如果对象需要移动，则设置新的mark word为compact_top所指
-  if ((HeapWord*)q != compact_top) {
-    q->forward_to(oop(compact_top));
-  } 
-  // 否则初始化mark word即可
-  else {
-    q->init_mark_raw();
-  }
-  
-  // compact_top前移
-  compact_top += size;
+![](mark_compact_phase2_1.png)
 
-  if (compact_top > cp->threshold)
-    cp->threshold =
-      cp->space->cross_threshold(compact_top - size, compact_top);
-  return compact_top;
-}
-```
+![](mark_compact_phase2_2.png)
+
+![](mark_compact_phase2_3.png)
 
 ## 3. 阶段3：调整对象指针
 还记得第一阶段GC Root的标记行为吗？
