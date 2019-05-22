@@ -58,7 +58,7 @@ CollectedHeap* EpsilonArguments::create_heap() {
 ```
 GCArguments::create_heap()更简单，直接根据堆的类型(EpsilonHeap，真正的Java堆空间表示)和垃圾回收器策略(EpsilonCollectorPolicy，堆初始化大小，最小，最大值，对齐等信息)创建堆。这个新创建的堆是EpsilonHeap，关于Java堆体系可以参见[Java分代堆](gc_heap_overview.md)，简单来说，每种垃圾回收器都有一个独属于自己的可垃圾回收堆，它需要继承自CollectedHeap：
 ```cpp
-// \hotspot\share\gc\epsilon\epsilonHeap.hpp
+// hotspot\share\gc\epsilon\epsilonHeap.hpp
 class EpsilonHeap : public CollectedHeap {
   friend class VMStructs;
 private:
@@ -98,7 +98,7 @@ public:
 ```
 CollectedHeap是一个抽象基类，里面有很多纯虚函数需要子类重写，创建完堆之后JVM会初始化堆，初始化分两步走：EpsilonHeap::initialize和EpsilonHeap::post_initialize。initialize是重头戏，它做了最重要的工作，包括堆内存的申请，barrier的设置：
 ```cpp
-
+// hotspot\share\gc\epsilon\epsilonHeap.hpp
 jint EpsilonHeap::initialize() {
   size_t align = _policy->heap_alignment();
   size_t init_byte_size = align_up(_policy->initial_heap_byte_size(), align);
@@ -157,6 +157,7 @@ EpsilonGC支持普通内存分配和TLAB内存分配，前者接口是mem_alloca
 
 ### 3.1 普通内存分配
 ```cpp
+// hotspot\share\gc\epsilon\epsilonHeap.hpp
 HeapWord* EpsilonHeap::mem_allocate(size_t size, bool *gc_overhead_limit_was_exceeded) {
   *gc_overhead_limit_was_exceeded = false;
   return allocate_work(size);
@@ -246,58 +247,38 @@ public class GCBaby {
 ```
 ### 3.2 TLAB内存分配
 ```cpp
+// hotspot\share\gc\epsilon\epsilonHeap.hpp
 HeapWord* EpsilonHeap::allocate_new_tlab(size_t min_size,
                                          size_t requested_size,
                                          size_t* actual_size) {
   Thread* thread = Thread::current();
-
-  // Defaults in case elastic paths are not taken
   bool fits = true;
   size_t size = requested_size;
   size_t ergo_tlab = requested_size;
   int64_t time = 0;
-
+  // 如果启用TLAB
   if (EpsilonElasticTLAB) {
+    // 为线程设置TLAB
     ergo_tlab = EpsilonThreadLocalData::ergo_tlab_size(thread);
-
+    // 如果启用TLAB衰减，则默认1s后TLAB大小重置为0
     if (EpsilonElasticTLABDecay) {
       int64_t last_time = EpsilonThreadLocalData::last_tlab_time(thread);
       time = (int64_t) os::javaTimeNanos();
-
-      assert(last_time <= time, "time should be monotonic");
-
-      // If the thread had not allocated recently, retract the ergonomic size.
-      // This conserves memory when the thread had initial burst of allocations,
-      // and then started allocating only sporadically.
       if (last_time != 0 && (time - last_time > _decay_time_ns)) {
         ergo_tlab = 0;
         EpsilonThreadLocalData::set_ergo_tlab_size(thread, 0);
       }
     }
-
-    // If we can fit the allocation under current TLAB size, do so.
-    // Otherwise, we want to elastically increase the TLAB size.
+    // 如果TLAB大小能容纳下本次分配，就在TLAB上分配
+    // 否则弹性的增大TLAB大小，所谓的弹性增大默认是1.1倍扩大
     fits = (requested_size <= ergo_tlab);
     if (!fits) {
       size = (size_t) (ergo_tlab * EpsilonTLABElasticity);
     }
   }
 
-  // Always honor boundaries
   size = MAX2(min_size, MIN2(_max_tlab_size, size));
-
-  // Always honor alignment
   size = align_up(size, MinObjAlignment);
-
-  // Check that adjustments did not break local and global invariants
-  assert(is_object_aligned(size),
-         "Size honors object alignment: " SIZE_FORMAT, size);
-  assert(min_size <= size,
-         "Size honors min size: "  SIZE_FORMAT " <= " SIZE_FORMAT, min_size, size);
-  assert(size <= _max_tlab_size,
-         "Size honors max size: "  SIZE_FORMAT " <= " SIZE_FORMAT, size, _max_tlab_size);
-  assert(size <= CollectedHeap::max_tlab_size(),
-         "Size honors global max size: "  SIZE_FORMAT " <= " SIZE_FORMAT, size, CollectedHeap::max_tlab_size());
 
   if (log_is_enabled(Trace, gc)) {
     ResourceMark rm;
@@ -311,21 +292,20 @@ HeapWord* EpsilonHeap::allocate_new_tlab(size_t min_size,
                   size * HeapWordSize / K);
   }
 
-  // All prepared, let's do it!
+  // 准备就绪，分配内存
   HeapWord* res = allocate_work(size);
 
   if (res != NULL) {
-    // Allocation successful
+    // 分配成功
     *actual_size = size;
     if (EpsilonElasticTLABDecay) {
       EpsilonThreadLocalData::set_last_tlab_time(thread, time);
     }
     if (EpsilonElasticTLAB && !fits) {
-      // If we requested expansion, this is our new ergonomic TLAB size
       EpsilonThreadLocalData::set_ergo_tlab_size(thread, size);
     }
   } else {
-    // Allocation failed, reset ergonomics to try and fit smaller TLABs
+    // 分配失败
     if (EpsilonElasticTLAB) {
       EpsilonThreadLocalData::set_ergo_tlab_size(thread, 0);
     }
@@ -333,7 +313,6 @@ HeapWord* EpsilonHeap::allocate_new_tlab(size_t min_size,
 
   return res;
 }
-
 ```
 
 ## 4. 垃圾回收
@@ -344,7 +323,6 @@ void EpsilonHeap::collect(GCCause::Cause cause) {
   log_info(gc)("GC request for \"%s\" is ignored", GCCause::to_string(cause));
   _monitoring_support->update_counters();
 }
-
 ```
 然后？就没啦！大功告成。如果想做一个有实际垃圾回收效果的GC可以继续阅读[Do It Yourself (OpenJDK) Garbage Collector](https://shipilev.net/jvm/diy-gc/#_epsilon_gc)，这篇文章在Epislon GC上增加了一个基于标记-压缩(Mark-Compact)算法的垃圾回收机制。
 
