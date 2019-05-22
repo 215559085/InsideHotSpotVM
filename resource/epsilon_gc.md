@@ -5,21 +5,21 @@ Epislon GC源于RedHat开发者Aleksey Shipilëv提交的一份JEP草案，该GC
 
 Epislon GC源码位于`gc/epsilon`:
 ```bash
-hotspot/share/gc/epsilon
+hotspot/share/gc/epsilon:
 	epsilon_globals.hpp           # GC提供的一些JVM参数，如-XX:+UseEpsilonGC
 	epsilonArguments.cpp
 	epsilonArguments.hpp          # GC参数在JVM中的表示，是否使用TLAB等，是否开启EpsilonGC等
 	epsilonBarrierSet.cpp
-	epsilonBarrierSet.hpp
+	epsilonBarrierSet.hpp         # GC barrier，用于线程创建的时候初始化TLAB
 	epsilonCollectorPolicy.hpp    # 垃圾回收策略，堆初始化大小，最小，最大值，对齐等信息
 	epsilonHeap.cpp			          # 包含堆初始化，内存分配，垃圾回收接口
 	epsilonHeap.hpp               # 真正的堆表示，EpsilonGC独有
 	epsilonMemoryPool.cpp
-	epsilonMemoryPool.hpp
-	epsilonMonitoringSupport.cpp  #
-	epsilonMonitoringSupport.hpp  #
-	epsilonThreadLocalData.hpp    #
-	vmStructs_epsilon.hpp         #
+	epsilonMemoryPool.hpp         # 感知该堆内存的使用情况，gc次数，gc线程数，上次gc时间等
+	epsilonMonitoringSupport.cpp  
+	epsilonMonitoringSupport.hpp  # perfdata支持
+	epsilonThreadLocalData.hpp    # TLAB内存分配
+	vmStructs_epsilon.hpp         # serviceability agent支持
 ```
 另外为了启动EpislonGC需要添加JVM参数`-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC`，为了输出GC日志查看详细过程添加JVM参数`-Xlog:gc*=trace`(仅限fastdebug版JVM)
 
@@ -62,41 +62,36 @@ GCArguments::create_heap()更简单，直接根据堆的类型(EpsilonHeap，真
 class EpsilonHeap : public CollectedHeap {
   friend class VMStructs;
 private:
+  // 回收器策略
   EpsilonCollectorPolicy* _policy;
+  // 软引用清除策略
   SoftRefPolicy _soft_ref_policy;
+  // perfdata支持
   EpsilonMonitoringSupport* _monitoring_support;
+  // 感知内存池使用情况
   MemoryPool* _pool;
   GCMemoryManager _memory_manager;
+  // 实际堆空间
   ContiguousSpace* _space;
+  // 虚拟内存（及其物理后备）
   VirtualSpace _virtual_space;
+  // 最大TLAB
   size_t _max_tlab_size;
+  // 间隔多少次内存分配再进行perdata数据更新
   size_t _step_counter_update;
+  // 间隔多少次内存分配再进行堆用量输出
   size_t _step_heap_print;
+  // TLAB大小衰减时间
   int64_t _decay_time_ns;
+  // 最后一次perdata数据更新计数
   volatile size_t _last_counter_update;
+  // 最后一次输出堆用量计数
   volatile size_t _last_heap_print;
-
 public:
-  static EpsilonHeap* heap();
-
-  EpsilonHeap(EpsilonCollectorPolicy* p) :
-          _policy(p),
-          _memory_manager("Epsilon Heap", "") {};
-
-  virtual jint initialize();
-  virtual void post_initialize();
-  virtual void initialize_serviceability();
-
-  virtual GrowableArray<GCMemoryManager*> memory_managers();
-  virtual GrowableArray<MemoryPool*> memory_pools();
-
-  virtual size_t max_capacity() const { return _virtual_space.reserved_size();  }
-  virtual size_t capacity()     const { return _virtual_space.committed_size(); }
-  virtual size_t used()         const { return _space->used(); }
   ...
 };
 ```
-CollectedHeap是一个抽象基类，里面有很多纯虚函数需要子类重写，创建完堆之后JVM会初始化堆，初始化分两步走：EpsilonHeap::initialize和EpsilonHeap::post_initialize。initialize是重头戏，它做了最重要的工作，包括堆内存的申请，barrier的设置：
+CollectedHeap是一个抽象基类，里面有很多纯虚函数需要子类重写，创建完堆之后JVM会初始化堆，初始化分两步走：EpsilonHeap::initialize和EpsilonHeap::post_initialize。initialize是重头戏，它做了最重要的工作，包括堆内存的申请，gc barrier的设置：
 ```cpp
 // hotspot\share\gc\epsilon\epsilonHeap.hpp
 jint EpsilonHeap::initialize() {
@@ -104,7 +99,7 @@ jint EpsilonHeap::initialize() {
   size_t init_byte_size = align_up(_policy->initial_heap_byte_size(), align);
   size_t max_byte_size  = align_up(_policy->max_heap_byte_size(), align);
 
-  // 向虚拟内存空间reserve内存然后commit部分
+  // 申请虚拟内存空间，然后commit一部分
   // [------------------------------|------------------]
   // [           committed          |      reserved    ]
   // 0                           init_byte_size      max_byte_size
@@ -127,17 +122,17 @@ jint EpsilonHeap::initialize() {
   _step_heap_print = (EpsilonPrintHeapSteps == 0) ? SIZE_MAX : (max_byte_size / EpsilonPrintHeapSteps);
   _decay_time_ns = (int64_t) EpsilonTLABDecayTime * NANOSECS_PER_MILLISEC;
 
-  // 开启监控，可以感知空间used，capacity等信息
+  // perfdata支持，外部可以访问共享内存感知堆信息
   _monitoring_support = new EpsilonMonitoringSupport(this);
   _last_counter_update = 0;
   _last_heap_print = 0;
 
-  // 创建barrier
+  // 创建gc barrier，比如CMS修改老年代指向新生代的指针就有一个write barrier
+  // Epsilon GC只是用它在线程创建的时候初始化TLAB
   BarrierSet::set_barrier_set(new EpsilonBarrierSet());
 
   // 完成初始化，输出配置信息
   ...
-
   return JNI_OK;
 }
 
@@ -191,15 +186,13 @@ HeapWord* EpsilonHeap::allocate_work(size_t size) {
   }
 
   size_t used = _space->used();
-
-  // 如果分配成功，更新计数器
+  // 分配成功，更新perdata信息
   {
     size_t last = _last_counter_update;
     if ((used - last >= _step_counter_update) && Atomic::cmpxchg(used, &_last_counter_update, last) == last) {
       _monitoring_support->update_counters();
     }
   }
-
   // 输出堆占用情况
   {
     size_t last = _last_heap_print;
@@ -322,6 +315,24 @@ HeapWord* EpsilonHeap::allocate_new_tlab(size_t min_size,
 void EpsilonHeap::collect(GCCause::Cause cause) {
   log_info(gc)("GC request for \"%s\" is ignored", GCCause::to_string(cause));
   _monitoring_support->update_counters();
+}
+void EpsilonHeap::do_full_collection(bool clear_all_soft_refs) {
+  log_info(gc)("Full GC request for \"%s\" is ignored", GCCause::to_string(gc_cause()));
+  _monitoring_support->update_counters();
+}
+// hotspot\share\gc\epsilon\epsilonMonitoringSupport.cpp
+void EpsilonMonitoringSupport::update_counters() {
+  MemoryService::track_memory_usage();
+  // 如果启用perfdata
+  if (UsePerfData) {
+    EpsilonHeap* heap = EpsilonHeap::heap();
+    size_t used = heap->used();
+    size_t capacity = heap->capacity();
+    _heap_counters->update_all();
+    _space_counters->update_all(capacity, used);
+    MetaspaceCounters::update_performance_counters();
+    CompressedClassSpaceCounters::update_performance_counters();
+  }
 }
 ```
 然后？就没啦！大功告成。如果想做一个有实际垃圾回收效果的GC可以继续阅读[Do It Yourself (OpenJDK) Garbage Collector](https://shipilev.net/jvm/diy-gc/#_epsilon_gc)，这篇文章在Epislon GC上增加了一个基于标记-压缩(Mark-Compact)算法的垃圾回收机制。
