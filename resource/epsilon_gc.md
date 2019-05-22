@@ -1,9 +1,9 @@
 # [Inside HotSpot] Epsilon GC
 
-## 1. Epislon GC简介
-Epislon GC源于RedHat开发者Aleksey Shipilëv提交的一份JEP草案，该GC只做**内存分配**而不做**内存回收**(reclaim)，当堆空间耗尽关闭JVM即可，因为它不做任何垃圾回收工作，所以又叫No-op GC。也因为它简单，很适合用来入门OpenJDK GC源码，看看一个最小化可行的垃圾回收器应该具备哪些功能。
+## 1. Epsilon GC简介
+Epsilon GC源于RedHat开发者Aleksey Shipilëv提交的一份[JEP 318: Epsilon: A No-Op Garbage Collector (Experimental)](https://openjdk.java.net/jeps/318)草案，该GC只做**内存分配**而不做**内存回收**(reclaim)，当堆空间耗尽关闭JVM即可，因为它不做任何垃圾回收工作，所以又叫No-op GC。也因为它简单，很适合用来入门OpenJDK GC源码，看看一个最小化可行的垃圾回收器应该具备哪些功能。
 
-Epislon GC源码位于`gc/epsilon`:
+Epsilon GC源码位于`gc/epsilon`:
 ```bash
 hotspot/share/gc/epsilon:
 	epsilon_globals.hpp           # GC提供的一些JVM参数，如-XX:+UseEpsilonGC
@@ -21,7 +21,7 @@ hotspot/share/gc/epsilon:
 	epsilonThreadLocalData.hpp    # TLAB内存分配
 	vmStructs_epsilon.hpp         # serviceability agent支持
 ```
-另外为了启动EpislonGC需要添加JVM参数`-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC`，为了输出GC日志查看详细过程添加JVM参数`-Xlog:gc*=trace`(仅限fastdebug版JVM)
+另外为了启动EpsilonGC需要添加JVM参数`-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC`，为了输出GC日志查看详细过程添加JVM参数`-Xlog:gc*=trace`(仅限fastdebug版JVM)
 
 ## 2. EpsilonGC创建
 虚拟机在创建早期会调用GCArguments::initialize()初始化GC参数，然后创建中期会配置好堆空间并调用GCArguments::create_heap()创建堆：
@@ -335,7 +335,7 @@ void EpsilonMonitoringSupport::update_counters() {
   }
 }
 ```
-然后？就没啦！大功告成。如果想做一个有实际垃圾回收效果的GC可以继续阅读[Do It Yourself (OpenJDK) Garbage Collector](https://shipilev.net/jvm/diy-gc/#_epsilon_gc)，这篇文章在Epislon GC上增加了一个基于标记-压缩(Mark-Compact)算法的垃圾回收机制。
+然后？就没啦！大功告成。如果想做一个有实际垃圾回收效果的GC可以继续阅读[Do It Yourself (OpenJDK) Garbage Collector](https://shipilev.net/jvm/diy-gc/#_epsilon_gc)，这篇文章在Epsilon GC上增加了一个基于标记-压缩(Mark-Compact)算法的垃圾回收机制。
 
 ## 引用
 \[1\] [Build Your Own GC in 20 Minutes](https://shipilev.net/jvm/diy-gc/kennke-fosdem-2019.webm)
