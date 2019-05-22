@@ -22,7 +22,7 @@
 + [[Inside HotSpot] Java的方法调用](resource/java_call.md)
 
 ## GC
-+ [[Inside HotSpot] 安全点](resource/safepoint.md) **WIP**
++ [[Inside HotSpot] Epsilon GC](resource/epsilon_gc.md) **WIP**
 + [[Inside HotSpot] Java分代堆](resource/gc_heap_overview.md) **WIP**
 + [[Inside HotSpot] Serial垃圾回收器Full GC](resource/gc_serialgc_markcompact.md)
 
