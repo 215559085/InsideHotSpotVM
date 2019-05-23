@@ -91,16 +91,15 @@ inline void MarkSweep::mark_object(oop obj) {
 ```js
 // hotspot\share\oops\markOop.hpp
 32 位mark lword：
-          hash:25 ------------>| age:4    biased_lock:1 lock:2 (normal object)
-          JavaThread*:23 epoch:2 age:4    biased_lock:1 lock:2 (biased object)
-          size:32 ------------------------------------------>| (CMS free block)
-          PromotedObject*:29 ---------->| promo_bits:3 ----->| (CMS promoted object)
-
+  hash:25 ------------>| age:4    biased_lock:1 lock:2 (normal object)
+  JavaThread*:23 epoch:2 age:4    biased_lock:1 lock:2 (biased object)
+  size:32 ------------------------------------------>| (CMS free block)
+  PromotedObject*:29 ---------->| promo_bits:3 ----->| (CMS promoted object)
 最后的lock2位有不同含义：
-          [ptr             | 00]  locked             ptr指向栈上真正的对象头
-          [header      | 0 | 01]  unlocked           普通对象头
-          [ptr             | 10]  monitor            膨胀锁
-          [ptr             | 11]  marked             GC标记
+  [ptr             | 00]  locked             ptr指向栈上真正的对象头
+  [header      | 0 | 01]  unlocked           普通对象头
+  [ptr             | 10]  monitor            膨胀锁
+  [ptr             | 11]  marked             GC标记
 ```
 原来垃圾回收标记就是对每个对象mark word最后两位置11，可是如果最后两位用于其他用途怎么办？比如这个对象的最后两位表示膨胀锁，那GC就不能对它进行标记了，所以垃圾回收器还需要视情况在额外区域保留对象的mark word（PreservedMark）。回到之前的话题，GC Root有很多，有的是我们耳熟能详的，有的则是略微少见：
 
@@ -338,47 +337,6 @@ inline void CompactibleSpace::scan_and_compact(SpaceType* space) {
 ```
 另外值得注意的是Full GC的四个步骤都是针对整个堆的，也就是说新生代的Eden，From survivor， To survivor，老年代全都做了标记压缩操作，而不只是老年代。
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Serial垃圾回收器Minor GC
 ## 1. DefNewGeneration垃圾回收
 新生代使用复制算法对新生代做垃圾回收，比老年代的标记-压缩简单很多，所有回收代码都位于DefNewGeneration::collect：
@@ -389,164 +347,62 @@ void DefNewGeneration::collect(bool   full,
                                size_t size,
                                bool   is_tlab) {
   SerialHeap* heap = SerialHeap::heap();
-
-  _gc_timer->register_gc_start();
-  DefNewTracer gc_tracer;
-  gc_tracer.report_gc_start(heap->gc_cause(), _gc_timer->gc_start());
   _old_gen = heap->old_gen();
-
   // 如果新生代全是存活对象，老年代可能容不下新生代的晋升
   // 则设置增量垃圾回收失败，直接返回
   if (!collection_attempt_is_safe()) {
-    log_trace(gc)(":: Collection attempt not safe ::");
     heap->set_incremental_collection_failed(); 
     return;
   }
-
-  init_assuming_no_promotion_failure();
-  GCTraceTime(Trace, gc, phases) tm("DefNew", NULL, heap->gc_cause());
-  heap->trace_heap_before_gc(&gc_tracer);
-
-  // 存活检查闭包
+  ...
+  // 各种闭包初始化
   IsAliveClosure is_alive(this);
-  // 扫描弱引用闭包
-  ScanWeakRefClosure scan_weak_ref(this);
+  ...
   
-  age_table()->clear();
-  to()->clear(SpaceDecorator::Mangle);
-  _preserved_marks_set.init(1);
-  heap->rem_set()->prepare_for_younger_refs_iterate(false);
-  
-  // 快速扫描闭包
-  FastScanClosure fsc_with_no_gc_barrier(this, false);
-  // 带GC屏障的快速扫描闭包（老年代扫描专用）
-  FastScanClosure fsc_with_gc_barrier(this, true);
-
-  // 类加载数据扫描闭包
-  CLDScanClosure cld_scan_closure(&fsc_with_no_gc_barrier,
-                                  heap->rem_set()->cld_rem_set()->accumulate_modified_oops());
-
-  set_promo_failure_scan_stack_closure(&fsc_with_no_gc_barrier);
-  FastEvacuateFollowersClosure evacuate_followers(heap,
-                                                  &fsc_with_no_gc_barrier,
-                                                  &fsc_with_gc_barrier);
-
-  assert(heap->no_allocs_since_save_marks(),
-         "save marks have not been newly set.");
-
   {
-    // 扫描新生代GC Root
+    // 扫描GC Root，用快速扫描闭包做对象复制
     StrongRootsScope srs(0);
     heap->young_process_roots(&srs,
                               &fsc_with_no_gc_barrier,
                               &fsc_with_gc_barrier,
                               &cld_scan_closure);
   }
-
-  // "evacuate followers".
+  // 用快速成员处理闭包处理非GC Root直达对象
   evacuate_followers.do_void();
+  // 特殊处理软引用，弱引用，虚引用，final引用
+ ...
 
-  FastKeepAliveClosure keep_alive(this, &scan_weak_ref);
-  ReferenceProcessor* rp = ref_processor();
-  rp->setup_policy(clear_all_soft_refs);
-  ReferenceProcessorPhaseTimes pt(_gc_timer, rp->max_num_queues());
-  const ReferenceProcessorStats& stats =
-  rp->process_discovered_references(&is_alive, &keep_alive, &evacuate_followers,
-                                    NULL, &pt);
-  gc_tracer.report_gc_reference_stats(stats);
-  gc_tracer.report_tenuring_threshold(tenuring_threshold());
-  pt.print_all_references();
-
-  WeakProcessor::weak_oops_do(&is_alive, &keep_alive);
-
-  // 如果晋升成功
+  // 如果晋升成功，则清空eden，from；交换from，to分区；调整老年代晋升阈值
+  // 同时还需要确保晋升成功的情况下to区一定是空的
   if (!_promotion_failed) {
-    // 交换from，to survivors分区
     eden()->clear(SpaceDecorator::Mangle);
     from()->clear(SpaceDecorator::Mangle);
     if (ZapUnusedHeapArea) {
-      // This is now done here because of the piece-meal mangling which
-      // can check for valid mangling at intermediate points in the
-      // collection(s).  When a young collection fails to collect
-      // sufficient space resizing of the young generation can occur
-      // an redistribute the spaces in the young generation.  Mangle
-      // here so that unzapped regions don't get distributed to
-      // other spaces.
       to()->mangle_unused_area();
     }
     swap_spaces();
-    
-    // 每次做完新生代GC后to survivor一定是空的 
-    assert(to()->is_empty(), "to space should be empty now");
-    
-    // 调整老年代晋升阈值
     adjust_desired_tenuring_threshold();
-
-    // A successful scavenge should restart the GC time limit count which is
-    // for full GC's.
     AdaptiveSizePolicy* size_policy = heap->size_policy();
     size_policy->reset_gc_overhead_limit_count();
-    assert(!heap->incremental_collection_failed(), "Should be clear");
-  } else {
-    // 否则晋升失败
-    assert(_promo_failure_scan_stack.is_empty(), "post condition");
-    _promo_failure_scan_stack.clear(true); // Clear cached segments.
-
+  } 
+  // 否则晋升失败，提醒老年代
+  else {
+    _promo_failure_scan_stack.clear(true); 
     remove_forwarding_pointers();
     log_info(gc, promotion)("Promotion failed");
-    // Add to-space to the list of space to compact
-    // when a promotion failure has occurred.  In that
-    // case there can be live objects in to-space
-    // as a result of a partial evacuation of eden
-    // and from-space.
-    swap_spaces();   // For uniformity wrt ParNewGeneration.
+    swap_spaces();
     from()->set_next_compaction_space(to());
     heap->set_incremental_collection_failed();
-
-    // Inform the next generation that a promotion failure occurred.
     _old_gen->promotion_failure_occurred();
-    gc_tracer.report_promotion_failed(_promotion_failed_info);
-
-    // Reset the PromotionFailureALot counters.
-    NOT_PRODUCT(heap->reset_promotion_should_fail();)
   }
-  // We should have processed and cleared all the preserved marks.
-  _preserved_marks_set.reclaim();
-  // set new iteration safe limit for the survivor spaces
-  from()->set_concurrent_iteration_safe_limit(from()->top());
-  to()->set_concurrent_iteration_safe_limit(to()->top());
-
-  // We need to use a monotonically non-decreasing time in ms
-  // or we will see time-warp warnings and os::javaTimeMillis()
-  // does not guarantee monotonicity.
-  jlong now = os::javaTimeNanos() / NANOSECS_PER_MILLISEC;
-  update_time_of_last_gc(now);
-
-  heap->trace_heap_after_gc(&gc_tracer);
-
-  _gc_timer->register_gc_end();
-
-  gc_tracer.report_gc_end(_gc_timer->gc_end(), _gc_timer->time_partitions());
+  // 更新gc日志，清除preserved mar
+  ...
 }
 ```
+在做Minor GC之前会检查此次垃圾回收是否安全，所谓是否安全是指最坏情况下新生代全是需要晋升的存活对象，这时候老年代能否安全容纳下。如果可以JVM回答可以做垃圾回收，那么再做下面的展开。
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-新生代的复制动作主要位于young_process_roots(),该函数首先会扫描所有类型的GC Root，使用快速扫描闭包将GC Root直达新生代的存活对象复制到survivor区，然后再扫描从老年代指向新生代的应用。快速扫描闭包指的是`FastScanClosure`，它的代码如下：
+## 2. 快速扫描闭包(FastScanClosure)
+新生代的复制动作主要位于young_process_roots(),该函数首先会扫描所有类型的GC Root，使用快速扫描闭包配合GC Root将直达的存活对象复制到To survivor区，然后再扫描从老年代指向新生代的应用。快速扫描闭包指的是`FastScanClosure`，它的代码如下：
 ```cpp
 // hotspot\share\gc\shared\genOopClosures.inline.hpp
 inline void FastScanClosure::do_oop(oop* p)       { FastScanClosure::do_oop_work(p); }
@@ -572,11 +428,12 @@ template <class T> inline void FastScanClosure::do_oop_work(T* p) {
   }
 }
 ```
-快速扫描闭包有两个值得注意的地方：
+一句话总结，快速扫描闭包的能力是**视情况复制地址所指对象或者晋升它**。这段代码有两个值得提及的地方：
 
 1. 根据情况进行复制的copy_to_survivor_space()
 2. 根据情况设置gc屏障的do_barrier()
 
+### 2.1 新生代到To survivor的复制
 先说第一个复制：
 ```cpp
 // hotspot\share\gc\serial\defNewGeneration.cpp
@@ -610,6 +467,7 @@ oop DefNewGeneration::copy_to_survivor_space(oop old) {
 ```
 代码很清晰，如果GC Root里面引用的对象年龄没有超过晋升阈值，就把它从新生代(Eden+From)转移到To,如果超过阈值直接从新生代转移到老年代。
 
+### 2.2 GC屏障
 然后说说gc barrier。[之前文章提到](gc_heap_overview.md)过老年代（TenuredGeneration，久任代）继承自卡表代（CardGeneration），卡表代把堆空间划分为一张张512字节的卡片，如果某个卡是脏卡（dirty card）就表示该卡表示的512字节内存空间存在指向新生代的对象，就需要扫描这篇区域。do_barrier()会检查是否开启gc barrier，是否老年代地址p指向的对象存在指向新生代的对象。如果条件都满足就会将卡标记为dirty，那么具体是怎么做的？
 ```cpp
 //hotspot\share\gc\shared\cardTableRS.hpp
@@ -636,80 +494,54 @@ card_shift表示常量9，卡表是一个字节数组，每个字节映射老年
 
 ![](calc_card.png)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-`FastEvacuateFollowersClosure`闭包
+## 3. 快速成员处理闭包(FastEvacuateFollowersClosure)
+不难看出，快速扫描闭包只是复制和晋升了GC Root直接可达的对象引用。但问题是对象还可能有成员，可达性分析是从GC Root出发寻找对象引用，以及对象成员的引用，对象成员的成员的引用...快速成员处理闭包正是处理剩下不那么直接的对象引用：
 ```cpp
 //hotspot\share\gc\serial\defNewGeneration.cpp
 void DefNewGeneration::FastEvacuateFollowersClosure::do_void() {
   do {
+    // 对整个堆引用快速成员处理闭包，注意快速扫描闭包是不能单独行动的
+    // 他还需要借助快速扫描闭包的力量，因为快速扫描闭包有复制对象的能力
+    // _scan_cur_or_nonheap表示快速扫描闭包
+    // _scan_older表示带gc屏障的快速扫描闭包
     _heap->oop_since_save_marks_iterate(_scan_cur_or_nonheap, _scan_older);
   } while (!_heap->no_allocs_since_save_marks());
 }
-//hotspot\share\gc\serial\serialHeap.inline.hpp
-template <typename OopClosureType1, typename OopClosureType2>
-void SerialHeap::oop_since_save_marks_iterate(OopClosureType1* cur,
-                                              OopClosureType2* older) {
-  young_gen()->oop_since_save_marks_iterate(cur);
-  old_gen()->oop_since_save_marks_iterate(older);
-}
-//hotspot\share\gc\serial\defNewGeneration.inline.hpp
-template <typename OopClosureType>
-void DefNewGeneration::oop_since_save_marks_iterate(OopClosureType* cl) {
-  cl->set_generation(this);
-  eden()->oop_since_save_marks_iterate(cl);
-  to()->oop_since_save_marks_iterate(cl);
-  from()->oop_since_save_marks_iterate(cl);
-  cl->reset_generation();
-  save_marks();
-}
+```
+第一步快速扫描闭包可能会将Eden+From区的对象提升到老年代，这时候如果只处理新生代是不够的，因为这些提升了的对象可能还有新生代的成员域，所以快速成员处理闭包作用的是除了To survivor的整个堆(Eden+From+Tenured)。
+```cpp
 //hotspot\share\gc\shared\space.inline.hpp
 template <typename OopClosureType>
 void ContiguousSpace::oop_since_save_marks_iterate(OopClosureType* blk) {
   HeapWord* t;
+  // 扫描指针为灰色对象开始
   HeapWord* p = saved_mark_word();
   const intx interval = PrefetchScanIntervalInBytes;
   do {
+    // 灰色对象结束
     t = top();
     while (p < t) {
       Prefetch::write(p, interval);
-      debug_only(HeapWord* prev = p);
       oop m = oop(p);
+      // 迭代处理对象m的成员&&返回对象m的大小
+      // 扫描指针向前推进
       p += m->oop_iterate_size(blk);
     }
   } while (t < top());
   set_saved_mark_word(p);
 }
 ```
+这里比较坑的是`oop_iterate_size()`函数会同时迭代处理对象m的成员并返回对象m的大小...还要注意oop_iterate_size()传入的blk表示的是快速扫描闭包，同样一句话总结，快速成员处理闭包的能力是**递归式处理一个分区所有对象及对象成员**，这种能力配合上快速扫描闭包最终效果就是将一个分区的对象视情况复制到到To survivor区或者晋升到老年代。
+
+关于快速扫描闭包和快速成员处理闭包用图片说明可能更简单，假设有ABCD四个对象：
+
+![](evacuation1.png)
+
+当快速扫描闭包完成时A假设会进入To区域：
+
+![](evacuation2.png)
+
+当快速成员处理闭包完成时A的成员B和老年代C指向的成员D也会进入To：
+
+![](evacuation3.png)
+

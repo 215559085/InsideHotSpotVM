@@ -27,5 +27,5 @@
 
 ### 附注
 1. 文章中JVM,jvm,hotspot,HotSpot等都表示的OpenJDK12的HotSpot虚拟机实现；From,from,From survivor一个意思;To，To survivor一个意思；
-2. 代码的部分干扰比如断言已清除
+2. 代码的部分干扰比如断言，繁琐不重要的日志记录已清除
 3. 强烈建议每一章按照自上而下的顺序阅读，因为下一篇文章很有可能需要上一篇文章的只是
