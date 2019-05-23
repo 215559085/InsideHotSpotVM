@@ -116,7 +116,6 @@ inline void MarkSweep::mark_object(oop obj) {
 
 它们都包含可进行标记的引用，会视情况进行单线程标记或者并发标记，JVM会使用CAS(Atomic::cmpxchg)自旋锁等待标记任务。如果任务全部完成，即标记线程和完成计数相等，就结束阻塞。当对象标记完成后jvm还会使用`ref_processor()->process_discovered_references()`对弱引用，软引用，虚引用，final引用（重写了finialize()方法的引用）根据它们的Java语义做特殊处理，不过与算法本身没有太大关系，有兴趣的请自行了解。
 
-
 ## 2. 阶段2：计算对象新地址
 
 计算对象新地址的思想是：从地址空间开始扫描，如果cur_obj指针指向已经GC标记过的对象，则将该对象的新地址设置为compact_top，然后compact_top推进，cur_obj推进，直至cur_obj到达地址空间结束。
