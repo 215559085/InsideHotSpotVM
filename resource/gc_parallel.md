@@ -129,8 +129,8 @@ PSMarkSweepProxy是一个命名空间，它做的唯一一件事情就是把调�
 |:---------:|------------|---------|
 |G1GC	  |G1New|	G1Old|
 |Parallel |GC|	ParallelScavenge	|ParallelOld(-UseParallelOld则是SerialOld)|
-|CMS	|ParNew	ConcurrentMarkSweep|
-|SerialGC|DefNew	SerialOld|
-|Epsilon|N/A	N/A|
+|CMS	|ParNew	|ConcurrentMarkSweep|
+|SerialGC|DefNew	|SerialOld|
+|Epsilon|N/A	|N/A|
 |ZGC	|N/A	|Z|
 |Shenandoah|	N/A|Shenandoah|
