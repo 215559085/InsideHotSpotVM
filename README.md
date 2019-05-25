@@ -17,7 +17,8 @@
 ## GC
 + [Epsilon GC](resource/epsilon_gc.md)
 + [Java分代堆](resource/gc_heap_overview.md) **WIP**
-+ [Serial垃圾回收器](resource/gc_serialgc.md)
++ [Serial垃圾回收器 (一) Full GC](resource/gc_serialgc_fullgc.md)
++ [Serial垃圾回收器 (二) Minor GC](resource/gc_serialgc_minorgc.md)
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
