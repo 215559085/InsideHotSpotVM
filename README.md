@@ -15,10 +15,11 @@
 + [Java的方法调用](resource/java_call.md)
 
 ## GC
-+ [Epsilon GC](resource/epsilon_gc.md)
-+ [Java分代堆](resource/gc_heap_overview.md) **WIP**
++ [Java分代堆](resource/gc_heap_overview.md)
++ [Epsilon GC](resource/gc_epsilongc.md)
 + [Serial垃圾回收器 (一) Full GC](resource/gc_serialgc_fullgc.md)
 + [Serial垃圾回收器 (二) Minor GC](resource/gc_serialgc_minorgc.md)
++ [Parallel和Parallel Old的区别](resource/gc_parallel.md)
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
@@ -29,4 +30,4 @@
 ### 附注
 1. 文章中JVM,jvm,hotspot,HotSpot等都表示的OpenJDK12的HotSpot虚拟机实现；From,from,From survivor一个意思;To，To survivor一个意思；
 2. 代码的部分干扰比如断言，繁琐不重要的日志记录已清除
-3. 强烈建议每一章按照自上而下的顺序阅读，因为下一篇文章很有可能需要上一篇文章的只是
+3. 强烈建议**每一章按照自上而下的顺序阅读**，因为下一篇文章很有可能需要上一篇文章的知识
