@@ -33,7 +33,7 @@ experimental(bool, UseZGC, false,
 ```bash
 λ tree .
 ├─gc
-│  ├─cms	  # UseConcMarkSweepGC
+│  ├─cms      # UseConcMarkSweepGC
 │  ├─epsilon  # UseEpsilonGC
 │  ├─g1       # UseG1GC
 │  ├─parallel # UseParallelGC && UseParallelOldGC
@@ -122,3 +122,15 @@ void ParallelScavengeHeap::do_full_collection(bool clear_all_soft_refs) {
 PSMarkSweepProxy是一个命名空间，它做的唯一一件事情就是把调用转发到PSMarkSweep类的同名方法，比如PSMarkSweepProxy::do_a()实际调用的是PSMarkSweep::do_a()。PSMarkSweep和[Serial GC Full GC](gc_serialgc_fullgc.md)提到的算法几乎一样，都是串行地分四个阶段对老年代做标记-压缩，稍有不同的是PSMarkSweep支持UseAdaptiveSizePolicy参数，它可以自适应的调整新生代和老年代的大小。
 
 总的来说，Parallel GC和Parallel Old GC说的是不一样的事情，**前者表示并行分代式垃圾回收器**，其老年代和新生代都是多线程并行操作。而**后者只是老年代是否使用并行的一个选项**(默认开启)，如果关闭则老年代退化为串行操作。足见Hotspot命名功力是多么的不忍直视...
+
+最后，附上所有垃圾回收器名和对应的分代名：
+
+| 垃圾回收器	 | 新生代名	| 老年代名 |
+|:---------:|------------|---------|
+|G1GC	  |G1New|	G1Old|
+|Parallel |GC|	ParallelScavenge	|ParallelOld(-UseParallelOld则是SerialOld)|
+|CMS	|ParNew	ConcurrentMarkSweep|
+|SerialGC|DefNew	SerialOld|
+|Epsilon|N/A	N/A|
+|ZGC	|N/A	|Z|
+|Shenandoah|	N/A|Shenandoah|
