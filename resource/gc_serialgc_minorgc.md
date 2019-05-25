@@ -163,7 +163,8 @@ card_shift表示常量9，卡表是一个字节数组，每个字节映射老年
 //hotspot\share\gc\serial\defNewGeneration.cpp
 void DefNewGeneration::FastEvacuateFollowersClosure::do_void() {
   do {
-    // 对整个堆引用快速成员处理闭包，注意快速扫描闭包是不能单独行动的
+    // 对整个堆引用快速成员处理闭包?
+    // 注意快速扫描闭包是不能单独行动的
     // 他还需要借助快速扫描闭包的力量，因为快速扫描闭包有复制对象的能力
     // _scan_cur_or_nonheap表示快速扫描闭包
     // _scan_older表示带gc屏障的快速扫描闭包
@@ -171,7 +172,7 @@ void DefNewGeneration::FastEvacuateFollowersClosure::do_void() {
   } while (!_heap->no_allocs_since_save_marks());
 }
 ```
-第一步快速扫描闭包可能会将Eden+From区的对象提升到老年代，这时候如果只处理新生代是不够的，因为这些提升了的对象可能还有新生代的成员域，所以快速成员处理闭包作用的是除了To survivor的整个堆(Eden+From+Tenured)。
+第一步快速扫描闭包可能会将Eden+From区的对象提升到老年代或者复制到To区，也就相当于此时的"GC Root"变成了To+老年代，所以快速成员处理闭包需要处理这两个代，但是不知道为什么Hotspot还额外处理了From+Eden...这个留待探究，先看看处理方法：
 ```cpp
 //hotspot\share\gc\shared\space.inline.hpp
 template <typename OopClosureType>
@@ -194,7 +195,7 @@ void ContiguousSpace::oop_since_save_marks_iterate(OopClosureType* blk) {
   set_saved_mark_word(p);
 }
 ```
-这里比较坑的是`oop_iterate_size()`函数会同时迭代处理对象m的成员并返回对象m的大小...还要注意oop_iterate_size()传入的blk表示的是快速扫描闭包，同样一句话总结，快速成员处理闭包的能力是**递归式处理一个分区所有对象及对象成员**，这种能力配合上快速扫描闭包最终效果就是将一个分区的对象视情况复制到到To survivor区或者晋升到老年代。
+比较坑的是`oop_iterate_size()`函数会同时迭代处理对象m的成员并返回对象m的大小...还要注意oop_iterate_size()传入的blk表示的是快速扫描闭包，同样一句话总结，快速成员处理闭包的能力是**递归式处理一个分区所有对象及对象成员**，这种能力配合上快速扫描闭包最终效果就是将一个分区的对象视情况复制到到To survivor区或者晋升到老年代。
 
 关于快速扫描闭包和快速成员处理闭包用图片说明可能更简单，假设有ABCD四个对象：
 

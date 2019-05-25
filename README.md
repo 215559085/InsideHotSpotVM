@@ -1,4 +1,4 @@
-# Inside-HotSpot
+# Inside HotSpot VM
 
 关于HotSpot(OpenJDK12)的内幕，对某个部分感兴趣的朋友可以创建Issue说明。Github Just-In-Time更新，[博客](https://www.cnblogs.com/kelthuzadx/)滞后更新。(注:WIP表示未完成的文章)
 
@@ -12,6 +12,7 @@
 + [C1编译器优化：全局值编号(GVN)](resource/c1opt_gvn.md)
 
 ### 运行时
++ [加载字节码到JVM](resource/class_parser.md) **WIP**
 + [Java的方法调用](resource/java_call.md)
 
 ## GC
@@ -19,7 +20,7 @@
 + [Epsilon GC](resource/gc_epsilongc.md)
 + [Serial垃圾回收器 (一) Full GC](resource/gc_serialgc_fullgc.md)
 + [Serial垃圾回收器 (二) Minor GC](resource/gc_serialgc_minorgc.md)
-+ [Parallel和Parallel Old的区别](resource/gc_parallel.md)
++ [Parallel和Parallel Old的区别](resource/gc_parallel_vs_parallelold.md)
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
