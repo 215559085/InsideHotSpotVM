@@ -19,7 +19,7 @@
 + [Epsilon GC](resource/gc_epsilongc.md)
 + [Serial垃圾回收器 (一) Full GC](resource/gc_serialgc_fullgc.md)
 + [Serial垃圾回收器 (二) Minor GC](resource/gc_serialgc_minorgc.md)
-+ [Parallel和Parallel Old的区别](resource/gc_parallel.md)
++ [UseParallelGC和UseParallelOldGC的区别](resource/gc_parallel.md)
 
 ### 其他
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
