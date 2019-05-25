@@ -159,3 +159,8 @@ class ClassLoader: AllStatic {
 	}
 }
 ```
+加载完类之后add_package会把该类加入包(PackageEntryTable)，包是一个哈希表的结构：
+```BASH
+| 包A | ->[类A,类B...]
+| 包B | ->[类C,类D...]
+```
