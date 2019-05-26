@@ -58,7 +58,8 @@ ClassFile {
 
 但是难得hotspot里面有一个模块是如此的简单，我们可以再仔细研究研究看看能不能有意外收获。
 
-## 2. Bootstrap类加载器
+## 2. 类加载器
+### 2.1 Bootstrap类加载器
 第一部分提到类解析器会将字节码文件解析成JVM内部用到的结构体，如果了解过oop-klass模型的朋友一定知道，这个结构体就是klass，或者更具体一点是**InstanceKlass**。沟通字节码文件和InstanceKlass的桥梁就是**klassFactory**。klass工厂会调用ClassFileParser将读到的字节码转化为InstanceKlass作为工厂的产出，而工厂的调用者就是著名的JVM类加载器，即Bootstrap类加载器，它位于`classfile/classloader`：
 ```cpp
 // hotspot\share\classfile\classLoader.cpp
@@ -83,38 +84,15 @@ class ClassLoader: AllStatic {
       // 文件名字，java/lang/String.class
 	  const char* const file_name = file_name_for_class_name(class_name,
 	                                                         name->utf8_length());
-
 	  ClassFileStream* stream = NULL;
 	  s2 classpath_index = 0;
 	  ClassPathEntry* e = NULL;
 
-	  // If search_append_only is true, boot loader visibility boundaries are
-	  // set to be _first_append_entry to the end. This includes:
-	  //   [-Xbootclasspath/a]; [jvmti appended entries]
-	  //
-	  // If search_append_only is false, boot loader visibility boundaries are
-	  // set to be the --patch-module entries plus the base piece. This includes:
-	  //   [--patch-module=<module>=<file>(<pathsep><file>)*]; [jimage | exploded module build]
-	  //
-
-	  // Load Attempt #1: --patch-module
-	  // Determine the class' defining module.  If it appears in the _patch_mod_entries,
-	  // attempt to load the class from those locations specific to the module.
-	  // Specifications to --patch-module can contain a partial number of classes
-	  // that are part of the overall module definition.  So if a particular class is not
-	  // found within its module specification, the search should continue to Load Attempt #2.
-	  // Note: The --patch-module entries are never searched if the boot loader's
-	  //       visibility boundary is limited to only searching the append entries.
-
-	  // 尝试加载#1 --patch-module
+	  // 尝试加载#1 [--patch-module]
 	  if (_patch_mod_entries != NULL && !search_append_only) {
-	    // At CDS dump time, the --patch-module entries are ignored. That means a
-	    // class is still loaded from the runtime image even if it might
-	    // appear in the _patch_mod_entries. The runtime shared class visibility
-	    // check will determine if a shared class is visible based on the runtime
-	    // environemnt, including the runtime --patch-module setting.
 	    if (!DumpSharedSpaces) {
-	      stream = search_module_entries(_patch_mod_entries, class_name, file_name, CHECK_NULL);
+	      stream = search_module_entries(_patch_mod_entries, class_name, 
+	      	file_name, CHECK_NULL);
 	    }
 	  }
 
@@ -130,7 +108,7 @@ class ClassLoader: AllStatic {
 	    }
 	  }
 
-	  // 尝试加载#3 [-Xbootclasspath/a]; [jvmti appended entries]
+	  // 尝试加载#3 [-Xbootclasspath/a | jvmti appended entries]
 	  if (search_append_only && (NULL == stream)) {
 	    classpath_index = 1;
 	    e = _first_append_entry;
