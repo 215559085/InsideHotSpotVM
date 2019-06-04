@@ -6,7 +6,7 @@
 + [模板解释器](resource/template_interpreter.md)
 
 ### 编译器
-+ [方法编译](resource/compile_method.md) **WIP**
++ [方法编译](resource/compile_method.md)
 + [C1编译器中间表示](resource/c1_compile.md)
 + [C1编译器HIR的构造](resource/c1_construct_hir.md)
 + [C1编译器优化：条件表达式消除](resource/c1opt_conditional_elimination.md)

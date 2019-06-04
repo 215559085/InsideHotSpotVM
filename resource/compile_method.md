@@ -114,7 +114,7 @@ void Method::set_code(const methodHandle& mh, CompiledMethod *code) {
 ```
 如果再进一步，比如C1就会在编译的最后一个阶段（codeinstall）使用Method::set_code将J生成的本地代码安装到nmethod上，不过这算是后话。
 
-## 3. OSR栈上替换
+## 3. 栈上替换(On Stack Replacement)
 前面在创建编译任务的时候会区分普通编译方法和OSR编译方法。OSR（On Stack Replacement）即栈上替换，它用于快速从解释器模式切换到JIT生成的本地代码。它的用处有限但是效果巨大，举个例子，如果一个方法只执行1次，但是里面有个循环执行千万次，对这个方法做JIT编译后如果要等待第二次方法的执行才会使用JIT生成的本地代码，那么JIT编译就完全失去了作用，因为方法不会调用第二次，这时候就需要使用OSR，在第10000次循环执行后JIT得到本地代码，用本地代码的栈桢替换解释器栈桢，在10001次使用本地代码。 可以写个简单的实例体验OSR的效果
 ```java
 public class Main {
@@ -132,7 +132,6 @@ public class Main {
 ```
 当开启OSR(`-Xcomp -XX:+UseOnStackReplace`)使用了277毫秒，关闭OSR则是1875毫秒
 
-## 4. ReplayCompiles
-
-
+## 4. 编译重放(ReplayCompiles)
+最后非产品级HotSpot还有个有趣的东西叫编译重放（`ci/ciReplay`），使用`-XX:CompileCommand=option,Benchmark::test,DumpInline`可以将一个Benchmark::test方法的编译信息存放到replay_pidxx_compxx.log文件，然后下一次使用`-XX:+ReplayCompiles -XX:ReplayDataFile=replay_pidxx_compxx.log`，当虚拟机启动的时候会从log文件读取数据，并将编译任务投入到编译队列，然后进入进入阻塞状态（相当于禁止后台编译一样，主线程主动等待编译结束），当编译完成后继续执行程序，这种`第一次运行存放编译任务->第二次运行获取编译任务->第二次执行编译`的过程就是编译重放，本质上编译重放就是一个编译数据序列化反序列化的操作，只是难点是判断哪些数据是编译必须的。
 
