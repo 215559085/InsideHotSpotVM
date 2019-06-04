@@ -1,4 +1,4 @@
-# [Inside HotSpot] C1编译器工作流程及中间表示
+# [Inside HotSpot] C1编译器中间表示
 
 ## 1. C1编译器线程
 C1编译器(aka Client Compiler)的代码位于`hotspot\share\c1`。C1编译线程(C1 CompilerThread)会阻塞在任务队列，当发现队列有编译任务即可CompileTask的时候，线程唤醒然后调用CompilerBroker，CompilerBroker再进一步选择合适编译器，以此进入JIT编译器的世界。
@@ -21,7 +21,7 @@ typedef enum {
       _t_linearScan,              //     线性扫描寄存器分配
       _t_lirGeneration,           //     生成LIR
     _t_codeemit,                  //   机器代码生成
-    _t_codeinstall,               //   替换解释执行的代码为机器代码(nmethod)
+    _t_codeinstall,               //   将生成的本地代码放入nmethod(nmethod是Java方法的本地代码表示)
   max_phase_timers
 } TimerName;
 ```
@@ -36,7 +36,7 @@ CompileBroker::invoke_compiler_on_method()
 在compile_java_method()方法中完成了C1编译最主要的流程：
 ```cpp
 int Compilation::compile_java_method() {
-  ..
+  ...
   // 构造HIR
   {
     PhaseTraceTime timeit(_t_buildIR);
@@ -115,42 +115,19 @@ void Compilation::build_hir() {
     return;
   }
 
-#ifndef PRODUCT
-  if (PrintCFGToFile) {
-    CFGPrinter::print_cfg(_hir, "After Generation of HIR", true, false);
-  }
-#endif
-
-#ifndef PRODUCT
-  if (PrintCFG || PrintCFG0) { tty->print_cr("CFG after parsing"); _hir->print(true); }
-  if (PrintIR  || PrintIR0 ) { tty->print_cr("IR after parsing"); _hir->print(false); }
-#endif
-  
   // 验证HIR
   _hir->verify();
   
   // 优化：条件表达式消除，基本块消除
   if (UseC1Optimizations) {
     NEEDS_CLEANUP
-    // optimization
     PhaseTraceTime timeit(_t_optimize_blocks);
-
     _hir->optimize_blocks();
   }
 
   _hir->verify();
-
   _hir->split_critical_edges();
-
-#ifndef PRODUCT
-  if (PrintCFG || PrintCFG1) { tty->print_cr("CFG after optimizations"); _hir->print(true); }
-  if (PrintIR  || PrintIR1 ) { tty->print_cr("IR after optimizations"); _hir->print(false); }
-#endif
-
   _hir->verify();
-
-  // compute block ordering for code generation
-  // the control flow must not be changed from here on
   _hir->compute_code();
 
   // 优化：全局值编号优化
@@ -159,17 +136,9 @@ void Compilation::build_hir() {
     PhaseTraceTime timeit(_t_gvn);
     int instructions = Instruction::number_of_instructions();
     GlobalValueNumbering gvn(_hir);
-    assert(instructions == Instruction::number_of_instructions(),
-           "shouldn't have created an instructions");
   }
 
   _hir->verify();
-
-#ifndef PRODUCT
-  if (PrintCFGToFile) {
-    CFGPrinter::print_cfg(_hir, "Before RangeCheckElimination", true, false);
-  }
-#endif
 
   // 优化：范围检查消除
   if (RangeCheckElimination) {
@@ -179,34 +148,15 @@ void Compilation::build_hir() {
     }
   }
 
-#ifndef PRODUCT
-  if (PrintCFGToFile) {
-    CFGPrinter::print_cfg(_hir, "After RangeCheckElimination", true, false);
-  }
-#endif
-
   // 优化：null检查消除
   if (UseC1Optimizations) {
-    // loop invariant code motion reorders instructions and range
-    // check elimination adds new instructions so do null check
-    // elimination after.
     NEEDS_CLEANUP
-    // optimization
     PhaseTraceTime timeit(_t_optimize_null_checks);
-
     _hir->eliminate_null_checks();
   }
 
   _hir->verify();
-
-  // compute use counts after global value numbering
   _hir->compute_use_counts();
-
-#ifndef PRODUCT
-  if (PrintCFG || PrintCFG2) { tty->print_cr("CFG before code generation"); _hir->code()->print(true); }
-  if (PrintIR  || PrintIR2 ) { tty->print_cr("IR before code generation"); _hir->code()->print(false, true); }
-#endif
-
   _hir->verify();
 }
 ```
