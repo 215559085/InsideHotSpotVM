@@ -26,7 +26,8 @@
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
 + [JVM新日志接口-xlog](resource/xlog.md)
 + [JVMTI(JVM Tool Interface)](resource/jvmti.md)
-+ [Visual Studio2017编译调试openjdk12](resource/building.md)
++ [Visual Studio2017编译调试OpenJDK12](resource/building_win.md)
++ [Xcode编译调试OpenJDK12](resource/building_osx.md)
 
 ### 附注
 1. 文章中JVM,jvm,hotspot,HotSpot等都表示的OpenJDK12的HotSpot虚拟机实现；From,from,From survivor一个意思;To，To survivor一个意思；

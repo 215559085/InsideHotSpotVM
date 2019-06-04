@@ -1,4 +1,4 @@
-# Visual Studio2017编译调试openjdk12
+# Visual Studio2017编译调试OpenJDK12
 
 ## 编译
 下载并编译好freetype，然后安装cygwin并安装必要工具：
