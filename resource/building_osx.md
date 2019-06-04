@@ -14,12 +14,6 @@ $ ./configure --enable-ccache --witt-debug-level=server-fastdebug
 $ make all #or make hotspot
 ```
 一切完成后`openjdk12/build/macos-x86_64-server-fastdebug`就是编译产出。
-然后cygwin打开，进入openjdk12目录输入命令进行编译：
-```bash
-$./configure --with-freetype-include=/your_path/freetype-2.9.1/src/include --with-freetype-lib=/your_path/freetype-2.9.1/lib --with-boot-jdk=/your_path/openjdk-12-x64_bin --disable-warnings-as-errors --with-toolchain-version=2017 --with-target-bits=64 --enable-debug'
-$make all
-```
-编译完成后生成类似`openjdk12/build/windows-x86_64-server-fastdebug`的目录，里面`jdk/bin/java.exe`即hotspot。
 
 ## xcode调试
 打开xcode创建一个项目，然后选择macOS，创建一个命令行项目：
