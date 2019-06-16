@@ -7,11 +7,11 @@
   0. 简介
   1. 解释器的两种实现
   2. 解释器
-    2.1 抽象解释器
-    2.2 模板解释器
+      1. 抽象解释器
+      2. 模板解释器
   3. 解释器生成器
-    3.1 生成器与解释器的关系
-    3.2 示例：数组越界异常例程生成
+      1. 生成器与解释器的关系
+      2. 示例：数组越界异常例程生成
     
 ### 编译器
 + [方法编译](resource/compile_method.md)
@@ -44,15 +44,15 @@
 + [加载字节码到JVM](resource/class_loader.md) **WIP**
   1. 字节码文件解析器
   2. 类加载器
-    2.1 Bootstrap类加载器 **WIP**
+      1. Bootstrap类加载器 **WIP**
 + [Java的方法调用](resource/java_call.md)
   1. 方法调用模块入口
   2. 寻找调用方法
   3. 建立栈帧
   4. Java方法调用
   5. 总结
-  A1. 使用hsdis查看对应的汇编表示 
-  A2. 解释器入口点
+  6. 附1：使用hsdis查看对应的汇编表示 
+  7. 附2：解释器入口点
 
 ## GC
 + [Java分代堆](resource/gc_heap_overview.md)
@@ -60,16 +60,16 @@
   2. 创建Java堆
   3. 初始化Java堆
   4. JVM分代堆详细结构
-    4.1 CollectedHeap
-    4.2 GenCollectedHeap
-    4.3 SerialHeap
+      1. CollectedHeap
+      2. GenCollectedHeap
+      3. SerialHeap
   5. 分代堆中的卡表代
 + [Epsilon GC](resource/gc_epsilongc.md)
   1. Epsilon GC简介
   2. EpsilonGC创建
   3. 内存分配
-    3.1 普通内存分配
-    3.2 TLAB内存分配
+      1. 普通内存分配
+      2. TLAB内存分配
   4. 垃圾回收
 + [Serial垃圾回收器 (一) Full GC](resource/gc_serialgc_fullgc.md)
   0. Serial垃圾回收器Full GC
@@ -80,8 +80,8 @@
 + [Serial垃圾回收器 (二) Minor GC](resource/gc_serialgc_minorgc.md)
   1. DefNewGeneration垃圾回收
   2. 快速扫描闭包(FastScanClosure)
-    2.1 新生代到To survivor的复制
-    2.2 GC屏障
+      1. 新生代到To survivor的复制
+      2. GC屏障
   3. 快速成员处理闭包(FastEvacuateFollowersClosure)
 + [UseParallelGC和UseParallelOldGC的区别](resource/gc_parallel_vs_parallelold.md)
 
