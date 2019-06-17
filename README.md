@@ -55,6 +55,7 @@
   7. 附2：解释器入口点
 
 ## GC
++ [安全点](resource/safepoint.md)
 + [Java分代堆](resource/gc_heap_overview.md)
   1. 宇宙初始化
   2. 创建Java堆
