@@ -17,7 +17,6 @@
 + 线程停止
 + ....
 
-
 完整列表可以参见`runtime/vmOperations.hpp`。
 
 低观点下的安全点是一页内存，如果JVM需要让所有线程STW，就将这页内存设置为不可读不可写，然后等待其他线程执行安全点访问代码(`汇编指令test`)，然后抛出页访问冲突异常。最后该线程的异常处理器捕获访问冲突异常，主动阻塞自身。反之，如果不需要安全点，只需将这页内存设置为可读可写，这时候安全点访问代码相当于一个空操作。
@@ -81,12 +80,13 @@ safepointMechanism有个上面没有提到的特性：线程局部握手。该�
 
 只举一例，JVM可以输出每个线程的调用栈，但是该需求并不需要让所有线程都到某个全局点停顿然后统一输出最后统一启动，理想的情况应该是各个线程到某个可以输出调用栈的点进行输出再启动即可，很明显，这种情况就是我们提到的线程局部握手的完美应用场景，实际上只要使用了`-XX:-ThreadLocalHandshakes`虚拟机就是这么做的。
 
-## 3. JVM白盒测试示例
-都说talk is cheap，所以我们得继续深入源码。上面提到白盒测试的情况，所谓白盒测试即测试者完全了解程序，希望看到测试程序走的路径和自己预料的一样，区别于黑盒测试测试者不关心走的路径，只希望最后输出的结果和自己预料的一样。HotSpot也支持[白盒测试](https://wiki.openjdk.java.net/display/HotSpot/The+WhiteBox+testing+API)。如果已经编译过hotspot，然后执行
+## 3. 线程局部握手
+### 3.1 白盒测试API
+前面提到线程局部握手应用于白盒测试的情景，所谓白盒测试是指测试者完全了解程序，希望看到测试程序走的路径和自己预料的一样，区别于黑盒测试测试者不关心走的路径，只希望最后输出的结果和自己预料的一样。HotSpot也支持[白盒测试](https://wiki.openjdk.java.net/display/HotSpot/The+WhiteBox+testing+API)。如果已经编译过hotspot，然后执行
 ```bash
 $ make build-test-lib
 ```
-在我的机器上，生成的wb.jar位于`/Users/kelthuyang/Desktop/openjdk12/build/macosx-x86_64-server-fastdebug/support/test/lib`。现在来试试白盒API。写个java程序，该程序会遍历所有线程的栈：
+生成的wb.jar位于`openjdk12/build/macosx-x86_64-server-fastdebug/support/test/lib`。现在来试试白盒API。写个java程序，该程序会遍历所有线程的栈：
 ```java
 package com.github.kelthuzadx;
 import sun.hotspot.WhiteBox;
@@ -110,6 +110,7 @@ Thread: 0x00007fb500800800  [0x2403] State: _running _has_called_back 0 _at_poll
   at com.github.kelthuzadx.WBTest.redundant(WBTest.java:10)
   at com.github.kelthuzadx.WBTest.main(WBTest.java:14)
 ```
+### 3.2 基于线程握手的实现
 Java层面的白盒测试API会调用HotSpot中`prims/whitebox.cpp`对应的入口。比如上面的`WhiteBox.handshakeWalkStack`会执行WB_HandshakeWalkStack：
 ```cpp
 WB_ENTRY(jint, WB_HandshakeWalkStack(JNIEnv* env, jobject wb, jobject thread_handle, jboolean all_threads))
@@ -147,7 +148,7 @@ WB_ENTRY(jint, WB_HandshakeWalkStack(JNIEnv* env, jobject wb, jobject thread_han
   return tsc.num_threads_completed();
 WB_END
 ```
-先明确一个事情，假如某个Java线程想做一些操作，比如GC，比如上面的线程局部握手，这个Java线程是没有能力的，它会吧该操作封装成`VM_xxx`然后投递到VM线程（jstack可以看到这个线程），然后VM线程从队列里面获取VM_xxx，根据需求做操作。基于上面的认识，如果启用了线程局部握手，Java线程会投递一个VM_HandshakeOneThread，如果没有就会投递VM_HandshakeFallbackOperation。这两个操作的区别正如我们之前提到的，前者在各个线程特设的一个点停顿，执行操作再启动，后者需要全局安全点停顿，执行操作，全局启动：
+假如某个Java线程想做一些操作，比如GC，比如dump调用栈，Java线程是没有能力的，它会把该操作封装成`VM_xxx`然后投递到VM线程（jstack可以看到这个线程）的任务队列。VM线程从队列里面获取`VM_xxx`并执行。基于上面的认识，如果启用了线程局部握手，Java线程会投递一个VM_HandshakeOneThread，如果没有就会投递VM_HandshakeFallbackOperation。这两个操作的区别正如我们之前提到的，前者在各个线程特设的一个点停顿，执行操作再启动，后者需要全局安全点停顿，执行操作，全局启动：
 ```cpp
 // hotspot\share\runtime\vmThread.cpp
 void VMThread::loop() {

@@ -56,6 +56,11 @@
 
 ## GC
 + [安全点](resource/safepoint.md)
+  1. 安全点简介
+  2. 创建安全点
+  3. 线程局部握手
+    1. 白盒测试API
+    2. 基于线程握手的实现
 + [Java分代堆](resource/gc_heap_overview.md)
   1. 宇宙初始化
   2. 创建Java堆
