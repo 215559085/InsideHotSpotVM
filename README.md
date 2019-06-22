@@ -92,6 +92,7 @@
 + [UseParallelGC和UseParallelOldGC的区别](resource/gc_parallel_vs_parallelold.md)
 
 ### 其他
++ [HotSpot源码结构](resource/hotspot_src_arch.md) **WIP**
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
 + [JVM新日志接口-xlog](resource/xlog.md)
 + [JVMTI(JVM Tool Interface)](resource/jvmti.md)
