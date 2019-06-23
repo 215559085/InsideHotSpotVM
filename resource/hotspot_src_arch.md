@@ -69,7 +69,7 @@
     ├── memory   
     │   └── metaspace
     ├── metaprogramming        # 元编程的一些type trait
-    ├── oops                   # oop-klass表示
+    ├── oops                   # 对象模型
     ├── opto                   # Server编译器，即大名鼎鼎的C2优化编译器
     ├── precompiled
     ├── prims                  # JDK里面JNI函数的实现+JVMTI的实现+白盒测试
