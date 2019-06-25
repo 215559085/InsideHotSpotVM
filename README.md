@@ -92,6 +92,7 @@
 + [UseParallelGC和UseParallelOldGC的区别](resource/gc_parallel_vs_parallelold.md)
 
 ### 其他
++ [HotSpot源码结构](resource/hotspot_src_arch.md) **WIP**
 + [hotspot的启动流程与main方法调用](resource/java_main.md)
 + [JVM新日志接口-xlog](resource/xlog.md)
 + [JVMTI(JVM Tool Interface)](resource/jvmti.md)
@@ -102,3 +103,10 @@
 1. 文章中JVM,jvm,hotspot,HotSpot等都表示的OpenJDK12的HotSpot虚拟机实现；From,from,From survivor一个意思;To，To survivor一个意思；
 2. 代码的部分干扰比如断言，繁琐不重要的日志记录已清除
 3. 强烈建议**每一章按照自上而下的顺序阅读**，因为下一篇文章很有可能需要上一篇文章的知识
+
+## 扩展阅读
+[1] Christian Wimmer: SSA Form for the Java HotSpot™ Client Compiler
+[2] Christian Wimmer: Linear Scan Register Allocation for the Java HotSpot™ Client Compiler
+[3] Thomas Würthinger, Christian Wimmer, Hanspeter Mössenböck: Visualization of Program Dependence Graphs
+[4] Michael Paleczny, Christopher Vick,Cliff Click: The Java HotSpotTM Server Compiler
+[5] Cliff Click: From Quads to Graphs: An Intermediate Representation's Journey
