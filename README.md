@@ -105,8 +105,9 @@
 3. 强烈建议**每一章按照自上而下的顺序阅读**，因为下一篇文章很有可能需要上一篇文章的知识
 
 ## 扩展阅读
-[1] Christian Wimmer: SSA Form for the Java HotSpot™ Client Compiler
-[2] Christian Wimmer: Linear Scan Register Allocation for the Java HotSpot™ Client Compiler
-[3] Thomas Würthinger, Christian Wimmer, Hanspeter Mössenböck: Visualization of Program Dependence Graphs
-[4] Michael Paleczny, Christopher Vick,Cliff Click: The Java HotSpotTM Server Compiler
-[5] Cliff Click: From Quads to Graphs: An Intermediate Representation's Journey
++ [1] Christian Wimmer: SSA Form for the Java HotSpot™ Client Compiler
++ [2] Christian Wimmer: Linear Scan Register Allocation for the Java HotSpot™ Client Compiler
++ [3] Thomas Würthinger, Christian Wimmer, Hanspeter Mössenböck: Visualization of Program Dependence Graphs
++ [4] Michael Paleczny, Christopher Vick,Cliff Click: The Java HotSpotTM Server Compiler
++ [5] Cliff Click: From Quads to Graphs: An Intermediate Representation's Journey
++ [6] http://compileroptimizations.com/index.html
