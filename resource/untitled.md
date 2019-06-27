@@ -1,3 +1,24 @@
+```cpp
+//hotspot\share\c1\c1_Compilation.cpp
+typedef enum {
+  _t_compile,                     // C1编译
+    _t_setup,                     //   1)设置C1编译环境
+    _t_buildIR,                   //   2)构造HIR
+      _t_hir_parse,               //     从字节码生成HIR
+      _t_gvn,                     //     GVN优化
+      _t_optimize_blocks,         //     基本块优化
+      _t_optimize_null_checks,    //     null检查优化消除
+      _t_rangeCheckElimination,   //     数组范围检查消除
+    _t_emit_lir,                  //   3)构造LIR
+      _t_linearScan,              //     线性扫描寄存器分配
+      _t_lirGeneration,           //     生成LIR
+    _t_codeemit,                  //   机器代码生成
+    _t_codeinstall,               //   将生成的本地代码放入nmethod(nmethod是Java方法的本地代码表示)
+  max_phase_timers
+} TimerName;
+```
+
+## 1. 从字节码生成HIR
 为了观察C1构造HIR，我们准备一段Java代码：
 ```java
 // bytecode
@@ -82,17 +103,15 @@ GraphBuilder::GraphBuilder(Compilation* compilation, IRScope* scope)
 
   _start = setup_start_block(osr_bci, start_block, _osr_entry, _initial_state);
 
+  // 消灭多余的SSA PHI节点
   eliminate_redundant_phis(_start);
 
-  NOT_PRODUCT(if (PrintValueNumbering && Verbose) print_stats());
-  // for osr compile, bailout if some requirements are not fulfilled
+  // 如果是OSR编译器但不满足下面的条件就会逃出编译
   if (osr_bci != -1) {
     BlockBegin* osr_block = blm.bci2block()->at(osr_bci);
     if (!osr_block->is_set(BlockBegin::was_visited_flag)) {
       BAILOUT("osr entry must have been visited for osr compile");
     }
-
-    // check if osr entry point has empty stack - we cannot handle non-empty stacks at osr entry points
     if (!osr_block->state()->stack_is_empty()) {
       BAILOUT("stack not empty at OSR entry point");
     }
@@ -165,7 +184,7 @@ BlockListBuilder找出了所有基本块的起始并连接成了控制流图，�
 |return       |                | v21 = return              |
 |----------------------------------------------------------|
 ```
-可以使用`-XX:+PrintIRDuringConstruction`查看这一步生成的完整SSA指令。
+模拟解释执行的代码全部位于GraphBuilder，按照JVM文档上规定的字节码语义来即可，这里不再赘述。当模拟执行完成后，可以使用`-XX:+PrintIRDuringConstruction`查看这一步生成的完整SSA指令。
 ```CPP
 B0 (SV) [0, -1] sux: B1 B2
 empty stack
@@ -211,4 +230,15 @@ sux表示后继基本块，pred表示前驱基本块。bci表示字节码偏移�
   7    0    a7     <instance 0x0000018a7fd50358 klass=java/lang/Class>
 . 7    0    i8     a7._104 (I) k
 ```
-第一行获取k所类的Class对象，然后得到k的值，这正是getstatic的语义。
+第一行获取k所类的Class对象，然后得到k的值，这正是getstatic的语义。本来到这里HIR已经创建成功了，但HotSpot还多了一步简化SSA PHI节点的过程，这一步由PhiSimplifier完成。TO WRITW
+
+## 2. 条件表达式消除
+
+
+
+
+
+## 2. GVN优化
+全局值编号（Global Value Numbering）将值编号技术扩展至多个基本块寻找优化机会
+。
+

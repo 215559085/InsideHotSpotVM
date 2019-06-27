@@ -110,7 +110,7 @@ public class C1Optimizations {
     }
 }
 ```
-要确定是**HotSpot认为这是条件表达式**而不是**我们认为这是条件表达式**，得加上`-XX:+PrintIR -XX:+PrintLIRWithAssembly`辅证（也可使用 -XX:+PrintCEE），产它出C1 HIR及其汇编表示。首先看看原始HIR：
+要确定是**HotSpot认为这是条件表达式**而不是**我们认为这是条件表达式**，得加上`-XX:+PrintIR -XX:+PrintLIRWithAssembly`辅证（也可使用 -XX:+PrintCEE），它产出C1 HIR及其汇编表示。首先看看原始HIR：
 ```js
 IR after parsing
 B4 [0, 0] -> B0 sux: B0

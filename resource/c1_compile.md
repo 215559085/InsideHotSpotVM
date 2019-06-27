@@ -95,28 +95,12 @@ SSA还有很多好处，这里只是一个小的方面，有兴趣的可以阅�
 build_hir()不仅会构造出HIR，还会执行很多平台无关的代码优化。**代码优化**不用多讲，JVM给我们带来性能上的信心很大程度上都源于此，这是评判JIT编译器的重要指标，也是编译器后端的主要任务。
 ```cpp
 void Compilation::build_hir() {
-  CHECK_BAILOUT();
-
   // 创建HIR
-  CompileLog* log = this->log();
-  if (log != NULL) {
-    log->begin_head("parse method='%d' ",
-                    log->identify(_method));
-    log->stamp();
-    log->end_head();
-  }
   {
     PhaseTraceTime timeit(_t_hir_parse);
     _hir = new IR(this, method(), osr_bci());
   }
-  if (log)  log->done("parse");
-  if (!_hir->is_valid()) {
-    bailout("invalid parsing");
-    return;
-  }
-
-  // 验证HIR
-  _hir->verify();
+  ...
   
   // 优化：条件表达式消除，基本块消除
   if (UseC1Optimizations) {
@@ -124,21 +108,14 @@ void Compilation::build_hir() {
     PhaseTraceTime timeit(_t_optimize_blocks);
     _hir->optimize_blocks();
   }
-
-  _hir->verify();
-  _hir->split_critical_edges();
-  _hir->verify();
-  _hir->compute_code();
+  ...
 
   // 优化：全局值编号优化
   if (UseGlobalValueNumbering) {
-    // No resource mark here! LoopInvariantCodeMotion can allocate ValueStack objects.
     PhaseTraceTime timeit(_t_gvn);
     int instructions = Instruction::number_of_instructions();
     GlobalValueNumbering gvn(_hir);
   }
-
-  _hir->verify();
 
   // 优化：范围检查消除
   if (RangeCheckElimination) {
@@ -154,10 +131,7 @@ void Compilation::build_hir() {
     PhaseTraceTime timeit(_t_optimize_null_checks);
     _hir->eliminate_null_checks();
   }
-
-  _hir->verify();
-  _hir->compute_use_counts();
-  _hir->verify();
+ ...
 }
 ```
 build_hir()第一阶段解析字节码生成HIR；之后会检查HIR是否有效，如果无效会发生Compilation Bailout，即编译脱离，这个词在JIT编译器中经常出现，它指的是当编译器在编译过程中遇到一些很难处理的情况，或者一些极特殊情况时会停止编译，然后回退到解释器。当对HIR的检查通过后，C1对其进行条件表达式消除，基本块消除；接着使用全局值编号(GVN，Global Value Numbering)；后再[消除一些数组范围检查(Range Check Elimination)]((http://www.ssw.uni-linz.ac.at/Research/Papers/Wuerthinger07/Wuerthinger07.pdf))；最后做NULL检查消除。另外要注意的是，如果开启了分层编译(TieredCompilation)，那么条件表达式消除和基本块消除只会发生在Tier1，Tier2层。
